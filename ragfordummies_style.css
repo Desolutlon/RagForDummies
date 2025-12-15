@@ -1,0 +1,118 @@
+.ragfordummies-settings {
+    padding: 15px;
+    background: var(--black30a);
+    border-radius: 10px;
+    margin-bottom: 20px;
+}
+
+.ragfordummies-settings h3 {
+    margin: 0 0 15px 0;
+    color: var(--SmartThemeBodyColor);
+    font-size: 1.2em;
+    border-bottom: 2px solid var(--SmartThemeQuoteColor);
+    padding-bottom: 10px;
+}
+
+.ragfordummies-settings h4 {
+    margin: 15px 0 10px 0;
+    color: var(--SmartThemeBodyColor);
+    font-size: 1.05em;
+    opacity: 0.9;
+}
+
+.ragfordummies-section {
+    margin-bottom: 20px;
+    padding: 15px;
+    background: var(--black50a);
+    border-radius: 8px;
+}
+
+.ragfordummies-settings label {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 12px;
+    color: var(--SmartThemeBodyColor);
+}
+
+.ragfordummies-settings label span {
+    margin-bottom: 5px;
+    font-weight: 500;
+    opacity: 0.9;
+}
+
+.ragfordummies-settings input[type="text"],
+.ragfordummies-settings input[type="password"],
+.ragfordummies-settings input[type="number"],
+.ragfordummies-settings select {
+    padding: 8px 12px;
+    background: var(--black70a);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+    color: var(--SmartThemeBodyColor);
+    font-size: 0.95em;
+    transition: border-color 0.2s;
+}
+
+.ragfordummies-settings input[type="text"]:focus,
+.ragfordummies-settings input[type="password"]:focus,
+.ragfordummies-settings input[type="number"]:focus,
+.ragfordummies-settings select:focus {
+    outline: none;
+    border-color: var(--SmartThemeQuoteColor);
+}
+
+.ragfordummies-settings .checkbox_label {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+}
+
+.ragfordummies-settings .checkbox_label input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+}
+
+.ragfordummies-settings button {
+    padding: 10px 20px;
+    background: var(--SmartThemeQuoteColor);
+    border: none;
+    border-radius: 5px;
+    color: var(--SmartThemeBodyColor);
+    font-size: 1em;
+    cursor: pointer;
+    transition: opacity 0.2s;
+    width: 100%;
+}
+
+.ragfordummies-settings button:hover {
+    opacity: 0.8;
+}
+
+.ragfordummies-settings button:active {
+    opacity: 0.6;
+}
+
+.ragfordummies-status {
+    margin-top: 15px;
+    padding: 12px;
+    background: var(--black70a);
+    border-radius: 5px;
+    color: var(--SmartThemeBodyColor);
+    font-size: 0.95em;
+    text-align: center;
+    border-left: 3px solid var(--SmartThemeQuoteColor);
+}
+
+.ragfordummies-settings input[type="number"] {
+    width: 100px;
+}
+
+/* Dark mode adjustments */
+@media (prefers-color-scheme: dark) {
+    .ragfordummies-settings input[type="text"],
+    .ragfordummies-settings input[type="password"],
+    .ragfordummies-settings input[type="number"],
+    .ragfordummies-settings select {
+        background: rgba(255, 255, 255, 0.05);
+    }
+}

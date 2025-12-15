@@ -1,0 +1,12 @@
+{
+  "display_name": "RagForDummies",
+  "loading_order": 1000,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Community",
+  "version": "1.0.0",
+  "homePage": "https://github.com/yourusername/RagForDummies",
+  "description": "A RAG extension for SillyTavern that actually works with group chats. Uses Qdrant for vector storage and supports multiple embedding providers."
+}
