@@ -1,2 +1,0 @@
-# RagForDummies
-IfThisWorksThenITrulyHateRetards
