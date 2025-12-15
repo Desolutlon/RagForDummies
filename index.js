@@ -31,16 +31,14 @@ let currentChatIndexed = false;
 let lastMessageCount = 0;
 let lastChatId = null;
 let pollingInterval = null;
-let indexedMessageIds = new Set(); // Track which messages we've already indexed
+let indexedMessageIds = new Set(); 
 
 // ===========================
 // Utility Functions
 // ===========================
 
 function generateUUID() {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-        return crypto.randomUUID();
-    }
+    // Reverted to the regex version for maximum compatibility
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         const r = Math.random() * 16 | 0;
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
@@ -86,7 +84,6 @@ async function qdrantRequest(endpoint, method = 'GET', body = null) {
 
 async function createCollection(collectionName, vectorSize = 1536) {
     try {
-        // Check if collection exists
         const collections = await qdrantRequest('/collections');
         const exists = collections.result.collections.some(c => c.name === collectionName);
         
@@ -95,7 +92,6 @@ async function createCollection(collectionName, vectorSize = 1536) {
             return true;
         }
         
-        // Create collection
         await qdrantRequest('/collections/' + collectionName, 'PUT', {
             vectors: {
                 size: vectorSize,
@@ -143,7 +139,6 @@ async function getCollectionInfo(collectionName) {
         const result = await qdrantRequest(`/collections/${collectionName}`);
         return result.result;
     } catch (error) {
-        // Collection doesn't exist
         return null;
     }
 }
@@ -166,14 +161,10 @@ async function generateEmbedding(text) {
     
     try {
         switch (provider) {
-            case 'kobold':
-                return await generateKoboldEmbedding(text);
-            case 'ollama':
-                return await generateOllamaEmbedding(text);
-            case 'openai':
-                return await generateOpenAIEmbedding(text);
-            default:
-                throw new Error(`Unknown embedding provider: ${provider}`);
+            case 'kobold': return await generateKoboldEmbedding(text);
+            case 'ollama': return await generateOllamaEmbedding(text);
+            case 'openai': return await generateOpenAIEmbedding(text);
+            default: throw new Error(`Unknown embedding provider: ${provider}`);
         }
     } catch (error) {
         console.error(`[${MODULE_NAME}] Failed to generate embedding:`, error);
@@ -288,7 +279,7 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
     }
     
     isIndexing = true;
-    shouldStopIndexing = false; // Reset stop flag
+    shouldStopIndexing = false;
     showStopButton();
     updateUI('status', 'Indexing chat...');
     
@@ -299,7 +290,6 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
         const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
         const collectionName = `${prefix}${chatIdHash}`;
         
-        // Get embedding size from first message
         const firstEmbedding = await generateEmbedding(buildEmbeddingText(messages[0], messages[0].tracker));
         await createCollection(collectionName, firstEmbedding.length);
         
@@ -307,11 +297,10 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
         let points = [];
         
         for (let i = 0; i < messages.length; i++) {
-            // CHECK STOP FLAG
             if (shouldStopIndexing) {
                 console.log(`[${MODULE_NAME}] Indexing stopped by user.`);
                 updateUI('status', 'Indexing stopped by user.');
-                return false; // Stop execution
+                return false;
             }
 
             const message = messages[i];
@@ -411,17 +400,18 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
 
 function getCurrentChatId() {
     try {
+        // Method 1: SillyTavern global
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
             const context = SillyTavern.getContext();
             if (context.chatMetadata?.chat_id_hash) return context.chatMetadata.chat_id_hash;
             if (context.chat_id) return context.chat_id;
         }
+        // Method 2: Global getContext
         if (typeof getContext === 'function') {
             const context = getContext();
             if (context.chatMetadata?.chat_id_hash) return context.chatMetadata.chat_id_hash;
             if (context.chat_id) return context.chat_id;
         }
-        // Removed console.log here to prevent loop spam
         return null;
     } catch (error) {
         return null;
@@ -467,7 +457,7 @@ async function onMessageSent(messageData) {
     
     const isGroupChat = isCurrentChatGroupChat();
     
-    // Auto-index entire chat on first message if not already indexed
+    // Auto-index entire chat on first message
     if (!currentChatIndexed && typeof SillyTavern !== 'undefined') {
         try {
             updateUI('status', 'Auto-indexing chat...');
@@ -485,11 +475,13 @@ async function onMessageSent(messageData) {
     
     // Index the new message
     if (currentChatIndexed) {
-        const context = SillyTavern.getContext();
-        const messageIndex = context.chat.length - 1;
-        // The messageData from hook might be partial, safe to fetch from context
-        const fullMessage = context.chat[messageIndex];
-        await indexSingleMessage(fullMessage, chatId, messageIndex, isGroupChat);
+        // Small delay to ensure ST has updated the context
+        setTimeout(async () => {
+            const context = SillyTavern.getContext();
+            const messageIndex = context.chat.length - 1;
+            const fullMessage = context.chat[messageIndex];
+            await indexSingleMessage(fullMessage, chatId, messageIndex, isGroupChat);
+        }, 500);
     }
 }
 
@@ -527,7 +519,7 @@ async function injectContextBeforeGeneration(data) {
     }
 }
 
-// Polling mechanism to detect new messages (Fallback)
+// Polling mechanism (Fallback)
 async function pollForNewMessages() {
     if (!extensionSettings.enabled || !extensionSettings.autoIndex || isIndexing) return;
     
@@ -538,7 +530,6 @@ async function pollForNewMessages() {
         const chatId = getCurrentChatId();
         if (!chatId) return;
         
-        // Handle Chat Change
         if (lastChatId !== chatId) {
             lastChatId = chatId;
             currentChatIndexed = false;
@@ -556,26 +547,21 @@ async function pollForNewMessages() {
             }
         }
         
-        // Handle New Messages
         const currentMessageCount = context.chat.length;
         if (currentMessageCount > lastMessageCount) {
             const isGroupChat = isCurrentChatGroupChat();
             
             if (!currentChatIndexed) {
-                // Try to auto-index
                 const jsonl = convertChatToJSONL(context);
-                // If this fails, we catch it so we don't loop forever crashing
                 try {
                     await indexChat(jsonl, chatId, isGroupChat);
                     currentChatIndexed = true;
                 } catch (idxErr) {
                     console.error("Auto-index failed during polling", idxErr);
-                    // Update count so we don't retry immediately
                     lastMessageCount = currentMessageCount; 
                     return; 
                 }
             } else {
-                // Index incremental
                 for (let i = lastMessageCount; i < currentMessageCount; i++) {
                     if (!indexedMessageIds.has(i)) {
                         await indexSingleMessage(context.chat[i], chatId, i, isGroupChat);
@@ -587,7 +573,7 @@ async function pollForNewMessages() {
             updateUI('status', 'Indexed new messages');
         }
     } catch (error) {
-        // Silent fail to avoid console loop
+        // Silent fail
     }
 }
 
@@ -626,7 +612,6 @@ function updateUI(element, value) {
 }
 
 function createSettingsUI() {
-    // Note: Added the Stop Indexing button with specific red styling
     const html = `
         <div id="ragfordummies_container" class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
@@ -644,34 +629,34 @@ function createSettingsUI() {
             
             <div class="ragfordummies-section">
                 <h4>Qdrant Configuration</h4>
-                <label>Mode: <select id="ragfordummies_qdrant_mode"><option value="local">Local</option><option value="cloud">Cloud</option></select></label>
-                <label>Local URL: <input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" /></label>
-                <label>Cloud URL: <input type="text" id="ragfordummies_qdrant_cloud_url" value="${extensionSettings.qdrantCloudUrl}" /></label>
-                <label>API Key: <input type="password" id="ragfordummies_qdrant_api_key" value="${extensionSettings.qdrantApiKey}" /></label>
+                <label>Mode: <select id="ragfordummies_qdrant_mode" class="text_pole"><option value="local">Local</option><option value="cloud">Cloud</option></select></label>
+                <label>Local URL: <input type="text" id="ragfordummies_qdrant_local_url" class="text_pole" value="${extensionSettings.qdrantLocalUrl}" /></label>
+                <label>Cloud URL: <input type="text" id="ragfordummies_qdrant_cloud_url" class="text_pole" value="${extensionSettings.qdrantCloudUrl}" /></label>
+                <label>API Key: <input type="password" id="ragfordummies_qdrant_api_key" class="text_pole" value="${extensionSettings.qdrantApiKey}" /></label>
             </div>
             
             <div class="ragfordummies-section">
                 <h4>Embedding Provider</h4>
-                <label>Provider: <select id="ragfordummies_embedding_provider">
+                <label>Provider: <select id="ragfordummies_embedding_provider" class="text_pole">
                     <option value="kobold">KoboldCpp</option><option value="ollama">Ollama</option><option value="openai">OpenAI</option>
                 </select></label>
                 
                 <div id="ragfordummies_kobold_settings">
-                    <label>Kobold URL: <input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" /></label>
+                    <label>Kobold URL: <input type="text" id="ragfordummies_kobold_url" class="text_pole" value="${extensionSettings.koboldUrl}" /></label>
                 </div>
                 <div id="ragfordummies_ollama_settings" style="display:none">
-                    <label>Ollama URL: <input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" /></label>
-                    <label>Model: <input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" /></label>
+                    <label>Ollama URL: <input type="text" id="ragfordummies_ollama_url" class="text_pole" value="${extensionSettings.ollamaUrl}" /></label>
+                    <label>Model: <input type="text" id="ragfordummies_ollama_model" class="text_pole" value="${extensionSettings.ollamaModel}" /></label>
                 </div>
                 <div id="ragfordummies_openai_settings" style="display:none">
-                    <label>API Key: <input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" /></label>
+                    <label>API Key: <input type="password" id="ragfordummies_openai_api_key" class="text_pole" value="${extensionSettings.openaiApiKey}" /></label>
                 </div>
             </div>
             
             <div class="ragfordummies-section">
                 <h4>RAG Settings</h4>
-                <label>Retrieval Count: <input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" /></label>
-                <label>Threshold: <input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" step="0.1" /></label>
+                <label>Retrieval Count: <input type="number" id="ragfordummies_retrieval_count" class="text_pole" value="${extensionSettings.retrievalCount}" /></label>
+                <label>Threshold: <input type="number" id="ragfordummies_similarity_threshold" class="text_pole" value="${extensionSettings.similarityThreshold}" step="0.1" /></label>
                 <label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} /> Inject Context</label>
             </div>
             
@@ -690,7 +675,6 @@ function createSettingsUI() {
 }
 
 function attachEventListeners() {
-    // Settings change handlers
     const inputs = ['enabled', 'qdrant_mode', 'qdrant_local_url', 'qdrant_cloud_url', 'qdrant_api_key', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 'openai_api_key', 'retrieval_count', 'similarity_threshold', 'inject_context'];
     
     inputs.forEach(id => {
@@ -700,7 +684,6 @@ function attachEventListeners() {
             extensionSettings[key] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? parseFloat(el.value) : el.value);
             saveSettings();
             
-            // Handle UI toggles
             if(id === 'embedding_provider') {
                 document.getElementById('ragfordummies_kobold_settings').style.display = el.value === 'kobold' ? '' : 'none';
                 document.getElementById('ragfordummies_ollama_settings').style.display = el.value === 'ollama' ? '' : 'none';
@@ -709,8 +692,8 @@ function attachEventListeners() {
         });
     });
 
-    // Test Buttons
-    document.getElementById('ragfordummies_test_qdrant')?.addEventListener('click', async () => {
+    const testQdrant = document.getElementById('ragfordummies_test_qdrant');
+    if (testQdrant) testQdrant.addEventListener('click', async () => {
         try {
             updateUI('status', 'Testing...');
             const res = await qdrantRequest('/collections');
@@ -718,8 +701,8 @@ function attachEventListeners() {
         } catch(e) { updateUI('status', 'Connection Failed'); }
     });
 
-    // Manual Index
-    document.getElementById('ragfordummies_index_current')?.addEventListener('click', async () => {
+    const indexBtn = document.getElementById('ragfordummies_index_current');
+    if (indexBtn) indexBtn.addEventListener('click', async () => {
         const chatId = getCurrentChatId();
         if(!chatId) return updateUI('status', 'No chat loaded');
         const context = SillyTavern.getContext();
@@ -727,8 +710,8 @@ function attachEventListeners() {
         await indexChat(jsonl, chatId, isCurrentChatGroupChat());
     });
 
-    // STOP BUTTON HANDLER
-    document.getElementById('ragfordummies_stop_indexing')?.addEventListener('click', () => {
+    const stopBtn = document.getElementById('ragfordummies_stop_indexing');
+    if (stopBtn) stopBtn.addEventListener('click', () => {
         shouldStopIndexing = true;
         updateUI('status', 'Stopping...');
     });
@@ -748,43 +731,57 @@ function loadSettings() {
 // ===========================
 
 async function init() {
-    loadSettings();
-    $('#extensions_settings').append(createSettingsUI());
-    
-    // UI Drawer Logic
-    setTimeout(() => {
-        const toggle = $('#ragfordummies_container .inline-drawer-toggle');
-        const content = $('#ragfordummies_container .inline-drawer-content');
-        content.hide();
-        toggle.on('click', () => {
-            toggle.find('.inline-drawer-icon').toggleClass('down up');
-            content.slideToggle(200);
-        });
+    try {
+        console.log(`[${MODULE_NAME}] Initialization started...`);
+        loadSettings();
         
-        // Refresh provider UI state
-        const provider = document.getElementById('ragfordummies_embedding_provider');
-        if(provider) provider.dispatchEvent(new Event('change'));
-    }, 500);
-    
-    attachEventListeners();
-    
-    // Event Registration
-    if (typeof eventSource !== 'undefined') {
-        console.log(`[${MODULE_NAME}] Registering Events...`);
-        
-        eventSource.on('chat_loaded', onChatLoaded);
-        eventSource.on('message_sent', onMessageSent);
-        // We do NOT use message_received for indexing, only for injection context prep if needed
-        eventSource.on('GENERATE_BEFORE_COMBINE_PROMPTS', injectContextBeforeGeneration);
-        eventSource.on('EXTENSION_PROMPT_REQUESTED', injectContextBeforeGeneration);
-    } else {
-        console.warn(`[${MODULE_NAME}] eventSource missing, falling back to polling.`);
-        await startPolling();
+        // Wait for container
+        const checkExist = setInterval(function() {
+            if ($('#extensions_settings').length) {
+                console.log(`[${MODULE_NAME}] Extension settings container found.`);
+                clearInterval(checkExist);
+                
+                // Inject HTML
+                $('#extensions_settings').append(createSettingsUI());
+                
+                // Setup Drawer
+                const toggle = $('#ragfordummies_container .inline-drawer-toggle');
+                const content = $('#ragfordummies_container .inline-drawer-content');
+                content.hide();
+                toggle.on('click', function() {
+                    $(this).find('.inline-drawer-icon').toggleClass('down up');
+                    content.slideToggle(200);
+                });
+                
+                // Attach listeners
+                attachEventListeners();
+                
+                // Trigger provider UI state refresh
+                const provider = document.getElementById('ragfordummies_embedding_provider');
+                if(provider) provider.dispatchEvent(new Event('change'));
+
+                console.log(`[${MODULE_NAME}] UI loaded successfully.`);
+            }
+        }, 1000);
+
+        // Event Registration
+        if (typeof eventSource !== 'undefined') {
+            eventSource.on('chat_loaded', onChatLoaded);
+            eventSource.on('message_sent', onMessageSent);
+            eventSource.on('GENERATE_BEFORE_COMBINE_PROMPTS', injectContextBeforeGeneration);
+            eventSource.on('EXTENSION_PROMPT_REQUESTED', injectContextBeforeGeneration);
+            console.log(`[${MODULE_NAME}] Events registered.`);
+        } else {
+            console.warn(`[${MODULE_NAME}] eventSource missing, falling back to polling.`);
+            await startPolling();
+        }
+
+    } catch (e) {
+        console.error(`[${MODULE_NAME}] Init error:`, e);
     }
-    
-    console.log(`[${MODULE_NAME}] Loaded.`);
 }
 
 jQuery(async () => {
-    setTimeout(init, 100);
+    // 500ms delay to give ST core time to initialize globals
+    setTimeout(init, 500);
 });
