@@ -57,16 +57,9 @@ ollama pull nomic-embed-text
 
 ## Installation
 
-1. Navigate to your SillyTavern installation directory
-2. Go to `public/scripts/extensions/third-party/`
-3. Clone or download this repository:
-```bash
-cd public/scripts/extensions/third-party/
-git clone https://github.com/yourusername/RagForDummies.git
-```
-
-4. Restart SillyTavern
-5. Go to Extensions > RagForDummies to configure
+1. Simply copy and paste the URL into your "install extension" tab of your SillyTavern.
+2. Go to Extensions > RagForDummies to configure.
+3. Have fun.
 
 ## Configuration
 
@@ -229,7 +222,7 @@ MIT License - feel free to modify and distribute
 
 ## Credits
 
-Created because existing RAG extensions didn't work for group chats. Built with frustration and determination.
+Created because existing RAG extensions didn't work for group chats. Built with frustration, determination, and a huge middle finger. 
 
 ## Support
 
