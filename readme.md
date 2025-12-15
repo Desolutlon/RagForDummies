@@ -39,7 +39,7 @@ docker run -p 6333:6333 qdrant/qdrant
 
 **Option 1: KoboldCpp (Recommended for local)**
 - Run KoboldCpp with an embedding-capable model
-- Default URL: `http://localhost:5001`
+- Default URL: `(http://localhost:11434)`
 - KoboldCpp uses OpenAI-compatible embedding endpoint
 
 **Option 2: Ollama**
