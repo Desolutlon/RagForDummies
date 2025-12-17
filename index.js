@@ -373,7 +373,7 @@ async function upsertVectors(collectionName, points) {
  * Hybrid search: combines filtered (proper noun) search with dense search
  * Strategy:
  *   1. Run 1 (Narrow): Search with proper noun filter
- *   2. Run 2 (Broad): If Run 1 returns < 2 results, run pure dense search
+ *   2. Run 2 (Broad): If Run 1 returns < retrievalCount results, run pure dense search
  *   3. Combine and deduplicate results, sorted by score
  */
 async function searchVectors(collectionName, vector, limit, scoreThreshold, properNouns) {
@@ -447,9 +447,9 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
             }
         }
         
-        // ===== RUN 2: Dense Search (if filtered returned < 2 results) =====
-        if (filteredResults.length < 2) {
-            console.log('[' + MODULE_NAME + '] Run 2: Dense search (filtered returned ' + filteredResults.length + ' < 2)...');
+        // ===== RUN 2: Dense Search (if filtered returned fewer than limit) =====
+        if (filteredResults.length < limit) {
+            console.log('[' + MODULE_NAME + '] Run 2: Dense search (filtered returned ' + filteredResults.length + ' < ' + limit + ')...');
             
             const denseResult = await qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
                 vector: vector,
@@ -465,7 +465,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
                 console.log('[' + MODULE_NAME + '] Dense top score: ' + denseResults[0].score.toFixed(3));
             }
         } else {
-            console.log('[' + MODULE_NAME + '] Skipping Run 2: filtered search returned sufficient results');
+            console.log('[' + MODULE_NAME + '] Skipping dense: filtered returned sufficient results (' + filteredResults.length + ' >= ' + limit + ')');
         }
         
         // ===== COMBINE AND DEDUPLICATE =====
