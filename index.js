@@ -1,6 +1,3 @@
-Below is the full updated `index.js` with the dense fallback logic tied to `extensionSettings.retrievalCount` in both the core `searchVectors` function and the “Test Hybrid Search” harness. Replace your file with this:
-
-```javascript
 /**
  * RagForDummies - A RAG extension for SillyTavern that actually works
  * Supports group chats with Qdrant vector storage
