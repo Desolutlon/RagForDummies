@@ -370,6 +370,26 @@ async function upsertVectors(collectionName, points) {
 }
 
 /**
+ * Delete points by message_index for a given chat and collection
+ */
+async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
+    try {
+        await qdrantRequest('/collections/' + collectionName + '/points/delete', 'POST', {
+            filter: {
+                must: [
+                    { key: 'chat_id_hash', match: { value: chatIdHash } },
+                    { key: 'message_index', match: { value: messageIndex } }
+                ]
+            },
+            wait: true
+        });
+        console.log('[' + MODULE_NAME + '] Deleted existing point for message_index=' + messageIndex);
+    } catch (err) {
+        console.warn('[' + MODULE_NAME + '] Delete (by message_index) failed:', err.message);
+    }
+}
+
+/**
  * Hybrid search: combines filtered (proper noun) search with dense search
  * Strategy:
  *   1. Run 1 (Narrow): Search with proper noun filter
@@ -1144,6 +1164,96 @@ async function onMessageReceived(messageData) {
     console.log('[' + MODULE_NAME + '] ===== MESSAGE RECEIVED HANDLER COMPLETE =====');
 }
 
+/**
+ * Handle a message being swiped (re-generated). Re-index the last message.
+ */
+async function onMessageSwiped(data) {
+    console.log('[' + MODULE_NAME + '] ===== MESSAGE SWIPED EVENT FIRED =====');
+
+    if (!extensionSettings.enabled) return;
+
+    const chatId = getCurrentChatId();
+    if (!chatId) return;
+
+    const isGroupChat = isCurrentChatGroupChat();
+    const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
+
+    // Ensure index exists
+    if (!currentChatIndexed) {
+        try {
+            const pointCount = await countPoints(collectionName);
+            if (pointCount > 0) {
+                currentChatIndexed = true;
+            } else {
+                console.log('[' + MODULE_NAME + '] Swipe: collection empty, skipping');
+                return;
+            }
+        } catch (e) {
+            console.log('[' + MODULE_NAME + '] Swipe: could not verify collection, skipping');
+            return;
+        }
+    }
+
+    // Re-index the last message (the swiped one)
+    let context;
+    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+        context = SillyTavern.getContext();
+    } else if (typeof getContext === 'function') {
+        context = getContext();
+    }
+    if (!context || !context.chat || context.chat.length === 0) return;
+
+    const messageIndex = context.chat.length - 1;
+    const message = context.chat[messageIndex];
+
+    await deleteMessageByIndex(collectionName, chatId, messageIndex);
+    await indexSingleMessage(message, chatId, messageIndex, isGroupChat);
+
+    console.log('[' + MODULE_NAME + '] Swipe: re-indexed message ' + messageIndex);
+}
+
+/**
+ * Handle a message being deleted. Remove its point by message_index.
+ */
+async function onMessageDeleted(data) {
+    console.log('[' + MODULE_NAME + '] ===== MESSAGE DELETED EVENT FIRED =====');
+
+    if (!extensionSettings.enabled) return;
+
+    const chatId = getCurrentChatId();
+    if (!chatId) return;
+
+    const isGroupChat = isCurrentChatGroupChat();
+    const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
+
+    // Ensure index exists
+    if (!currentChatIndexed) {
+        try {
+            const pointCount = await countPoints(collectionName);
+            if (pointCount > 0) {
+                currentChatIndexed = true;
+            } else {
+                console.log('[' + MODULE_NAME + '] Delete: collection empty, skipping');
+                return;
+            }
+        } catch (e) {
+            console.log('[' + MODULE_NAME + '] Delete: could not verify collection, skipping');
+            return;
+        }
+    }
+
+    // data is the message index (per console logs)
+    const messageIndex = typeof data === 'number' ? data : null;
+    if (messageIndex === null) {
+        console.log('[' + MODULE_NAME + '] Delete: no index provided, skipping');
+        return;
+    }
+
+    await deleteMessageByIndex(collectionName, chatId, messageIndex);
+    indexedMessageIds.delete(messageIndex);
+    console.log('[' + MODULE_NAME + '] Delete: removed message_index=' + messageIndex);
+}
+
 async function injectContextWithSetExtensionPrompt() {
     if (!extensionSettings.enabled || !extensionSettings.injectContext) {
         return;
@@ -1469,7 +1579,7 @@ async function pollForNewMessages() {
             updateUI('status', 'Ready - ' + currentMessageCount + ' messages indexed');
             
             // Only inject from polling if events aren't registered
-            // (events handle injection via GENERATE_BEFORE_COMBINE_PROMPTS etc.)
+            // (events handle injection via GENERATE_AFTER_COMMANDS etc.)
             if (extensionSettings.injectContext && !eventsRegistered) {
                 console.log('[' + MODULE_NAME + '] Polling: injecting context (no events available)');
                 await injectContextBeforeGeneration();
@@ -2455,6 +2565,8 @@ async function init() {
         eventSourceToUse.on('chat_loaded', onChatLoaded);
         eventSourceToUse.on('message_sent', onMessageSent);
         eventSourceToUse.on('message_received', onMessageReceived);
+        eventSourceToUse.on('message_swiped', onMessageSwiped);
+        eventSourceToUse.on('message_deleted', onMessageDeleted);
         
         // CRITICAL: Use GENERATION_AFTER_COMMANDS for injection
         // This fires BEFORE prompt assembly, so setExtensionPrompt will work!
