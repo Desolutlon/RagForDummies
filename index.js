@@ -1,3 +1,4 @@
+```javascript
 /**
  * RagForDummies - A RAG extension for SillyTavern that actually works
  * Supports group chats with Qdrant vector storage
@@ -1003,6 +1004,28 @@ function getActiveCharacterName() {
     return null;
 }
 
+// Prefer the latest user message; if none, fall back to latest non-system, non-empty message
+function getLastRelevantMessage(context) {
+    if (!context || !Array.isArray(context.chat) || context.chat.length === 0) return null;
+    // First: latest user message
+    for (let i = context.chat.length - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (!msg || !msg.mes || !msg.mes.trim()) continue;
+        if (msg.is_system) continue;
+        if (msg.is_user || msg.role === 'user') {
+            return msg;
+        }
+    }
+    // Fallback: latest non-system, non-empty
+    for (let i = context.chat.length - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (!msg || !msg.mes || !msg.mes.trim()) continue;
+        if (msg.is_system) continue;
+        return msg;
+    }
+    return null;
+}
+
 function isCurrentChatGroupChat() {
     try {
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
@@ -1285,14 +1308,7 @@ async function injectContextWithSetExtensionPrompt() {
     if (!context || !context.chat || context.chat.length === 0) return;
     if (!context.setExtensionPrompt || typeof context.setExtensionPrompt !== 'function') return;
 
-    let lastMessage = null;
-    for (let i = context.chat.length - 1; i >= 0; i--) {
-        const msg = context.chat[i];
-        if (msg.mes && !msg.is_system && msg.mes.trim().length > 0) {
-            lastMessage = msg;
-            break;
-        }
-    }
+    const lastMessage = getLastRelevantMessage(context);
     if (!lastMessage || !lastMessage.mes) return;
 
     let query = lastMessage.mes;
@@ -1350,14 +1366,7 @@ async function injectContextBeforeGeneration(data) {
     }
     if (!context || !context.chat || context.chat.length === 0) return;
 
-    let lastMessage = null;
-    for (let i = context.chat.length - 1; i >= 0; i--) {
-        const msg = context.chat[i];
-        if (msg.mes && !msg.is_system && msg.mes.trim().length > 0) {
-            lastMessage = msg;
-            break;
-        }
-    }
+    const lastMessage = getLastRelevantMessage(context);
     if (!lastMessage || !lastMessage.mes) return;
 
     let query = lastMessage.mes;
@@ -1677,13 +1686,7 @@ function attachEventListeners() {
                 }
                 
                 const context = SillyTavern.getContext();
-                const actualMessages = context.chat.filter(function(m) {
-                    if (!m.mes) return false;
-                    if (m.is_system) return false;
-                    if (m.mes.trim().length === 0) return false;
-                    return true;
-                });
-                const lastMessage = actualMessages[actualMessages.length - 1];
+                const lastMessage = getLastRelevantMessage(context);
                 if (!lastMessage) {
                     updateUI('status', '✗ No valid message found');
                     return;
@@ -2251,3 +2254,4 @@ jQuery(async function() {
         await init();
     }, 100);
 });
+```
