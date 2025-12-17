@@ -5,6 +5,25 @@
 
 const MODULE_NAME = 'RagForDummies';
 
+// Whitelist-only logging for this module
+const MODULE_LOG_WHITELIST = [
+    'Settings loaded',
+    'Extension loaded successfully',
+    'Container found',
+    'Content found',
+    'Initial check'
+];
+const __origConsoleLog = console.log.bind(console);
+console.log = function(...args) {
+    if (args.length && typeof args[0] === 'string' && args[0].startsWith('[' + MODULE_NAME + ']')) {
+        const msg = args[0];
+        if (!MODULE_LOG_WHITELIST.some(k => msg.indexOf(k) !== -1)) {
+            return; // suppress non-whitelisted module logs
+        }
+    }
+    __origConsoleLog(...args);
+};
+
 // Extension settings with defaults
 const defaultSettings = {
     enabled: true,
@@ -1817,7 +1836,7 @@ function createSettingsUI() {
                             '<input type="checkbox" id="ragfordummies_merge_uploads" checked />' +
                             '<span>Merge uploads into current chat collection</span>' +
                         '</label>' +
-                        '<button id="ragfordummies_upload_btn" class="menu_button">Upload Chat JSONL</button>' +
+                        '<button id="ragfordummies_upload_btn" class="menu_button">Upload File (JSONL or txt)</button>' +
                         '<input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" />' +
                         '<div id="ragfordummies_status" class="ragfordummies-status">Ready</div>' +
                     '</div>' +
