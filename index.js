@@ -1003,9 +1003,19 @@ function getActiveCharacterName() {
     return null;
 }
 
-// Latest non-system, non-empty message (user or character)
+// Prefer the latest user message; if none, fall back to latest non-system, non-empty message
 function getLastRelevantMessage(context) {
     if (!context || !Array.isArray(context.chat) || context.chat.length === 0) return null;
+    // First: latest user message
+    for (let i = context.chat.length - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (!msg || !msg.mes || !msg.mes.trim()) continue;
+        if (msg.is_system) continue;
+        if (msg.is_user || msg.role === 'user') {
+            return msg;
+        }
+    }
+    // Fallback: latest non-system, non-empty
     for (let i = context.chat.length - 1; i >= 0; i--) {
         const msg = context.chat[i];
         if (!msg || !msg.mes || !msg.mes.trim()) continue;
