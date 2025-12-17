@@ -220,7 +220,6 @@ function extractQueryFilterTerms(text) {
     
     const terms = new Set();
     
-    // Same stop words as extractProperNouns
     const stopWords = new Set([
         'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
         'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs',
@@ -876,7 +875,6 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
         
         const queryEmbedding = await generateEmbedding(query);
         
-        // Hybrid search
         const results = await searchVectors(
             collectionName,
             queryEmbedding,
@@ -890,7 +888,6 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
             return '';
         }
 
-        // Determine the character we’re replying as (assistant/main character)
         const activeChar = getActiveCharacterName();
         let filteredByPresence = results;
 
@@ -904,7 +901,6 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
                 console.log('[' + MODULE_NAME + '] Filtered out ' + (results.length - filteredByPresence.length) + ' result(s) where "' + activeChar + '" was not present');
             }
         } else {
-            // If we cannot determine active character, keep previous behavior but still remove empty characters_present
             filteredByPresence = results.filter(r => {
                 const cp = r.payload && Array.isArray(r.payload.characters_present) ? r.payload.characters_present : [];
                 return cp.length > 0;
@@ -1161,7 +1157,6 @@ async function onMessageSwiped(data) {
     const isGroupChat = isCurrentChatGroupChat();
     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
 
-    // Determine which index was swiped
     let targetIndex = null;
     if (typeof data === 'number') {
         targetIndex = data;
@@ -1169,7 +1164,6 @@ async function onMessageSwiped(data) {
         targetIndex = data.index;
     }
 
-    // Delay slightly to ensure SillyTavern updates the chat array after swipe
     setTimeout(async () => {
         try {
             if (!currentChatIndexed) {
@@ -1195,7 +1189,6 @@ async function onMessageSwiped(data) {
             }
             if (!context || !context.chat || context.chat.length === 0) return;
 
-            // Fallback to last message if no index provided
             if (targetIndex === null || targetIndex < 0 || targetIndex >= context.chat.length) {
                 targetIndex = context.chat.length - 1;
             }
@@ -1215,7 +1208,6 @@ async function onMessageSwiped(data) {
             console.error('[' + MODULE_NAME + '] Swipe reindex failed:', err);
         }
     }, 50);
-}
 }
 
 async function onMessageDeleted(data) {
