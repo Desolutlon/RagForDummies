@@ -302,7 +302,7 @@ function convertTextToJSONL(text) {
     const chatId = Date.now().toString();
     lines.push(JSON.stringify({ chat_metadata: { chat_id_hash: chatId } }));
     const rows = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
-    rows.forEach((row, idx) => {
+    rows.forEach((row) => {
         lines.push(JSON.stringify({
             name: 'User',
             mes: row,
@@ -828,3 +828,1522 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
         
         updateUI('status', 'Getting embedding dimensions...');
         const firstEmbedding = await generateEmbedding(buildEmbeddingText(messages[0], messages[0].tracker));
+        const vectorSize = firstEmbedding.length;
+        
+        await createCollection(collectionName, vectorSize);
+        
+        const batchSize = 10;
+        const points = [];
+        
+        for (let i = 0; i < messages.length; i++) {
+            if (shouldStopIndexing) {
+                console.log('[' + MODULE_NAME + '] Indexing stopped by user at message ' + i);
+                updateUI('status', 'Stopped at ' + i + '/' + messages.length + ' messages');
+                isIndexing = false;
+                shouldStopIndexing = false;
+                hideStopButton();
+                return false;
+            }
+            
+            const message = messages[i];
+            updateUI('status', 'Indexing ' + (i + 1) + '/' + messages.length + '...');
+            
+            const embeddingText = buildEmbeddingText(message, message.tracker);
+            const embedding = await generateEmbedding(embeddingText);
+            const payload = extractPayload(message, i, chatIdHash);
+            
+            points.push({
+                id: generateUUID(),
+                vector: embedding,
+                payload: payload
+            });
+            
+            if (points.length >= batchSize) {
+                await upsertVectors(collectionName, points);
+                points.length = 0;
+            }
+        }
+        
+        if (points.length > 0) {
+            await upsertVectors(collectionName, points);
+        }
+        
+        updateUI('status', 'Successfully indexed ' + messages.length + ' messages!');
+        console.log('[' + MODULE_NAME + '] Successfully indexed ' + messages.length + ' messages');
+        
+        isIndexing = false;
+        shouldStopIndexing = false;
+        hideStopButton();
+        return true;
+    } catch (error) {
+        console.error('[' + MODULE_NAME + '] Indexing failed:', error);
+        updateUI('status', 'Indexing failed: ' + error.message);
+        isIndexing = false;
+        shouldStopIndexing = false;
+        hideStopButton();
+        throw error;
+    }
+}
+
+async function indexSingleMessage(message, chatIdHash, messageIndex, isGroupChat) {
+    if (isGroupChat === undefined) isGroupChat = false;
+    
+    try {
+        const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+        const collectionName = prefix + chatIdHash;
+        
+        const embeddingText = buildEmbeddingText(message, message.tracker);
+        const embedding = await generateEmbedding(embeddingText);
+        const payload = extractPayload(message, messageIndex, chatIdHash);
+        
+        const point = {
+            id: generateUUID(),
+            vector: embedding,
+            payload: payload
+        };
+        
+        await upsertVectors(collectionName, [point]);
+        console.log('[' + MODULE_NAME + '] Indexed message ' + messageIndex);
+        
+        return true;
+    } catch (error) {
+        console.error('[' + MODULE_NAME + '] Failed to index message:', error);
+        return false;
+    }
+}
+
+// ===========================
+// Context Retrieval
+// ===========================
+
+async function retrieveContext(query, chatIdHash, isGroupChat) {
+    if (isGroupChat === undefined) isGroupChat = false;
+    
+    try {
+        const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+        const collectionName = prefix + chatIdHash;
+        
+        const queryFilterTerms = extractQueryFilterTerms(query);
+        console.log('[' + MODULE_NAME + '] Query filter terms: ' + 
+            (queryFilterTerms.length > 0 ? queryFilterTerms.join(', ') : '(none - pure dense search)'));
+        
+        const queryEmbedding = await generateEmbedding(query);
+        
+        const results = await searchVectors(
+            collectionName,
+            queryEmbedding,
+            extensionSettings.retrievalCount,
+            extensionSettings.similarityThreshold,
+            queryFilterTerms
+        );
+        
+        if (results.length === 0) {
+            console.log('[' + MODULE_NAME + '] No relevant context found');
+            return '';
+        }
+
+        const activeChar = getActiveCharacterName();
+        let filteredByPresence = results;
+
+        if (activeChar) {
+            const target = activeChar.toLowerCase();
+            filteredByPresence = results.filter(r => {
+                const cp = r.payload && Array.isArray(r.payload.characters_present) ? r.payload.characters_present : [];
+                return cp.some(name => String(name).toLowerCase() === target);
+            });
+            if (filteredByPresence.length !== results.length) {
+                console.log('[' + MODULE_NAME + '] Filtered out ' + (results.length - filteredByPresence.length) + ' result(s) where "' + activeChar + '" was not present');
+            }
+        } else {
+            filteredByPresence = results.filter(r => {
+                const cp = r.payload && Array.isArray(r.payload.characters_present) ? r.payload.characters_present : [];
+                return cp.length > 0;
+            });
+            if (filteredByPresence.length !== results.length) {
+                console.log('[' + MODULE_NAME + '] Filtered out ' + (results.length - filteredByPresence.length) + ' result(s) with no characters_present');
+            }
+        }
+
+        if (filteredByPresence.length === 0) {
+            console.log('[' + MODULE_NAME + '] No context left after characters_present filter');
+            return '';
+        }
+        
+        console.log('[' + MODULE_NAME + '] Retrieved ' + filteredByPresence.length + ' messages with scores:',
+            filteredByPresence.map(function(r) { return r.score.toFixed(3); }).join(', '));
+        
+        const contextParts = filteredByPresence.map(function(result) {
+            const p = result.payload;
+            const score = result.score;
+            const source = result._source || 'unknown';
+            
+            let text = '\n[Character: ' + p.character_name + ']';
+            if (p.timestamp) text += '\n[Time: ' + p.timestamp + ']';
+            if (p.topic) text += '\n[Topic: ' + p.topic + ']';
+            if (p.emotional_tone) text += '\n[Tone: ' + p.emotional_tone + ']';
+            if (p.location) text += '\n[Location: ' + p.location + ']';
+            text += '\n[Relevance Score: ' + score.toFixed(3) + ' (' + source + ')]';
+            
+            if (p.summary) {
+                text += '\n\nSummary: ' + p.summary;
+            }
+            
+            text += '\n\nFull Message: ' + p.full_message;
+            
+            return text;
+        });
+        
+        const context = '\n\n========== RELEVANT PAST CONTEXT FROM RAG ==========\n' + 
+                       contextParts.join('\n\n-------------------\n') + 
+                       '\n\n========== END RAG CONTEXT ==========\n\n';
+        
+        console.log('[' + MODULE_NAME + '] Formatted context with full metadata (' + context.length + ' chars)');
+        return context;
+    } catch (error) {
+        console.error('[' + MODULE_NAME + '] Context retrieval failed:', error);
+        return '';
+    }
+}
+
+// ===========================
+// SillyTavern Integration
+// ===========================
+
+function getCurrentChatId() {
+    try {
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            const context = SillyTavern.getContext();
+            if (context.chatMetadata && context.chatMetadata.chat_id_hash) {
+                return context.chatMetadata.chat_id_hash;
+            }
+            if (context.chat_id) {
+                return context.chat_id;
+            }
+        }
+        
+        if (typeof getContext === 'function') {
+            const context = getContext();
+            if (context.chatMetadata && context.chatMetadata.chat_id_hash) {
+                return context.chatMetadata.chat_id_hash;
+            }
+            if (context.chat_id) {
+                return context.chat_id;
+            }
+        }
+        
+        return null;
+    } catch (error) {
+        console.error('[' + MODULE_NAME + '] Error getting chat ID:', error);
+        return null;
+    }
+}
+
+function getActiveCharacterName() {
+    try {
+        let context = null;
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            context = SillyTavern.getContext();
+        } else if (typeof getContext === 'function') {
+            context = getContext();
+        }
+        if (!context) return null;
+
+        if (context.character && context.character.name) return context.character.name;
+        if (context.chatMetadata && context.chatMetadata.character_name) return context.chatMetadata.character_name;
+        if (context.main && context.main.name) return context.main.name;
+    } catch (e) {
+        console.warn('[' + MODULE_NAME + '] getActiveCharacterName failed:', e);
+    }
+    return null;
+}
+
+// Latest non-system, non-empty message (user or character)
+function getLastRelevantMessage(context) {
+    if (!context || !Array.isArray(context.chat) || context.chat.length === 0) return null;
+    for (let i = context.chat.length - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (!msg || !msg.mes || !msg.mes.trim()) continue;
+        if (msg.is_system) continue;
+        return msg;
+    }
+    return null;
+}
+
+function isCurrentChatGroupChat() {
+    try {
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            const context = SillyTavern.getContext();
+            return context.groupId !== null && context.groupId !== undefined;
+        }
+        
+        if (typeof getContext === 'function') {
+            const context = getContext();
+            return context.groupId !== null && context.groupId !== undefined;
+        }
+        
+        return false;
+    } catch (error) {
+        console.error('[' + MODULE_NAME + '] Error checking group chat:', error);
+        return false;
+    }
+}
+
+async function onChatLoaded() {
+    currentChatIndexed = false;
+    lastMessageCount = 0;
+    indexedMessageIds.clear();
+    
+    const chatId = getCurrentChatId();
+    lastChatId = chatId;
+    
+    console.log('[' + MODULE_NAME + '] Chat loaded. Chat ID:', chatId);
+    updateUI('status', 'Chat loaded - checking index...');
+    
+    try {
+        let context;
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            context = SillyTavern.getContext();
+        } else if (typeof getContext === 'function') {
+            context = getContext();
+        }
+        
+        if (context && context.chat) {
+            lastMessageCount = context.chat.length;
+            console.log('[' + MODULE_NAME + '] Initial message count: ' + lastMessageCount);
+        }
+        
+        if (chatId) {
+            const isGroupChat = isCurrentChatGroupChat();
+            const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+            const collectionName = prefix + chatId;
+            
+            try {
+                const pointCount = await countPoints(collectionName);
+                if (pointCount > 0) {
+                    currentChatIndexed = true;
+                    console.log('[' + MODULE_NAME + '] Collection exists with ' + pointCount + ' points - marking as indexed');
+                    updateUI('status', 'Indexed (' + pointCount + ' messages)');
+                } else {
+                    console.log('[' + MODULE_NAME + '] Collection empty or not found - needs indexing');
+                    updateUI('status', 'Ready to index');
+                }
+            } catch (checkError) {
+                console.log('[' + MODULE_NAME + '] Collection not found - needs indexing');
+                updateUI('status', 'Ready to index');
+            }
+        }
+    } catch (error) {
+        console.error('[' + MODULE_NAME + '] Error in onChatLoaded:', error);
+    }
+}
+
+async function onMessageSent(messageData) {
+    console.log('[' + MODULE_NAME + '] ===== MESSAGE SENT EVENT FIRED =====');
+    console.log('[' + MODULE_NAME + '] Event data:', messageData);
+    
+    if (!extensionSettings.enabled || !extensionSettings.autoIndex) {
+        console.log('[' + MODULE_NAME + '] Auto-index disabled, skipping');
+        return;
+    }
+    
+    const chatId = getCurrentChatId();
+    if (!chatId) {
+        console.log('[' + MODULE_NAME + '] No chat ID, skipping');
+        return;
+    }
+    
+    const isGroupChat = isCurrentChatGroupChat();
+    
+    if (!currentChatIndexed && typeof SillyTavern !== 'undefined') {
+        try {
+            updateUI('status', 'Auto-indexing chat...');
+            const context = SillyTavern.getContext();
+            if (context.chat && context.chat.length > 0) {
+                const jsonl = convertChatToJSONL(context);
+                await indexChat(jsonl, chatId, isGroupChat);
+                currentChatIndexed = true;
+            }
+        } catch (error) {
+            console.error('[' + MODULE_NAME + '] Auto-indexing failed:', error);
+            updateUI('status', 'Auto-index failed: ' + error.message);
+        }
+    }
+    
+    if (messageData && currentChatIndexed) {
+        const messageIndex = SillyTavern.getContext().chat.length - 1;
+        await indexSingleMessage(messageData, chatId, messageIndex, isGroupChat);
+    }
+    
+    console.log('[' + MODULE_NAME + '] ===== MESSAGE SENT HANDLER COMPLETE =====');
+}
+
+async function onMessageReceived(messageData) {
+    console.log('[' + MODULE_NAME + '] ===== MESSAGE RECEIVED EVENT FIRED =====');
+    
+    if (!extensionSettings.enabled || !extensionSettings.autoIndex) {
+        return;
+    }
+    
+    const chatId = getCurrentChatId();
+    if (!chatId) {
+        return;
+    }
+    
+    const isGroupChat = isCurrentChatGroupChat();
+    
+    if (currentChatIndexed && typeof SillyTavern !== 'undefined') {
+        try {
+            const context = SillyTavern.getContext();
+            if (context.chat && context.chat.length > 0) {
+                const messageIndex = context.chat.length - 1;
+                const message = context.chat[messageIndex];
+                if (!indexedMessageIds.has(messageIndex)) {
+                    console.log('[' + MODULE_NAME + '] Indexing received message ' + messageIndex);
+                    await indexSingleMessage(message, chatId, messageIndex, isGroupChat);
+                    indexedMessageIds.add(messageIndex);
+                    lastMessageCount = context.chat.length;
+                }
+            }
+        } catch (error) {
+            console.error('[' + MODULE_NAME + '] Failed to index received message:', error);
+        }
+    }
+    
+    console.log('[' + MODULE_NAME + '] ===== MESSAGE RECEIVED HANDLER COMPLETE =====');
+}
+
+async function onMessageSwiped(data) {
+    console.log('[' + MODULE_NAME + '] ===== MESSAGE SWIPED EVENT FIRED =====');
+
+    if (!extensionSettings.enabled) return;
+
+    const chatId = getCurrentChatId();
+    if (!chatId) return;
+
+    const isGroupChat = isCurrentChatGroupChat();
+    const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
+
+    let targetIndex = null;
+    if (typeof data === 'number') {
+        targetIndex = data;
+    } else if (data && typeof data.index === 'number') {
+        targetIndex = data.index;
+    }
+
+    setTimeout(async () => {
+        try {
+            if (!currentChatIndexed) {
+                try {
+                    const pointCount = await countPoints(collectionName);
+                    if (pointCount > 0) {
+                        currentChatIndexed = true;
+                    } else {
+                        console.log('[' + MODULE_NAME + '] Swipe: collection empty, skipping');
+                        return;
+                    }
+                } catch (e) {
+                    console.log('[' + MODULE_NAME + '] Swipe: could not verify collection, skipping');
+                    return;
+                }
+            }
+
+            let context = null;
+            if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+                context = SillyTavern.getContext();
+            } else if (typeof getContext === 'function') {
+                context = getContext();
+            }
+            if (!context || !context.chat || context.chat.length === 0) return;
+
+            if (targetIndex === null || targetIndex < 0 || targetIndex >= context.chat.length) {
+                targetIndex = context.chat.length - 1;
+            }
+
+            const message = context.chat[targetIndex];
+            if (!message) {
+                console.log('[' + MODULE_NAME + '] Swipe: message not found at index ' + targetIndex);
+                return;
+            }
+
+            await deleteMessageByIndex(collectionName, chatId, targetIndex);
+            await indexSingleMessage(message, chatId, targetIndex, isGroupChat);
+
+            indexedMessageIds.add(targetIndex);
+            console.log('[' + MODULE_NAME + '] Swipe: re-indexed message ' + targetIndex);
+        } catch (err) {
+            console.error('[' + MODULE_NAME + '] Swipe reindex failed:', err);
+        }
+    }, 50);
+}
+
+async function onMessageDeleted(data) {
+    console.log('[' + MODULE_NAME + '] ===== MESSAGE DELETED EVENT FIRED =====');
+
+    if (!extensionSettings.enabled) return;
+
+    const chatId = getCurrentChatId();
+    if (!chatId) return;
+
+    const isGroupChat = isCurrentChatGroupChat();
+    const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
+
+    if (!currentChatIndexed) {
+        try {
+            const pointCount = await countPoints(collectionName);
+            if (pointCount > 0) {
+                currentChatIndexed = true;
+            } else {
+                console.log('[' + MODULE_NAME + '] Delete: collection empty, skipping');
+                return;
+            }
+        } catch (e) {
+            console.log('[' + MODULE_NAME + '] Delete: could not verify collection, skipping');
+            return;
+        }
+    }
+
+    const messageIndex = typeof data === 'number' ? data : null;
+    if (messageIndex === null) {
+        console.log('[' + MODULE_NAME + '] Delete: no index provided, skipping');
+        return;
+    }
+
+    await deleteMessageByIndex(collectionName, chatId, messageIndex);
+    indexedMessageIds.delete(messageIndex);
+    console.log('[' + MODULE_NAME + '] Delete: removed message_index=' + messageIndex);
+}
+
+// ===========================
+// Polling Fallback
+// ===========================
+
+async function startPolling() {
+    if (pollingInterval) {
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+    }
+    pollingInterval = setInterval(async () => {
+        try {
+            if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
+            const chatId = getCurrentChatId();
+            if (!chatId) return;
+
+            let context = null;
+            if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+                context = SillyTavern.getContext();
+            } else if (typeof getContext === 'function') {
+                context = getContext();
+            }
+            if (!context || !context.chat) return;
+
+            const isGroupChat = isCurrentChatGroupChat();
+
+            // First time: auto-index entire chat
+            if (!currentChatIndexed) {
+                if (context.chat.length === 0) return;
+                const jsonl = convertChatToJSONL(context);
+                await indexChat(jsonl, chatId, isGroupChat);
+                currentChatIndexed = true;
+                lastMessageCount = context.chat.length;
+                return;
+            }
+
+            // Subsequent: index new messages
+            if (context.chat.length > lastMessageCount) {
+                for (let i = lastMessageCount; i < context.chat.length; i++) {
+                    const msg = context.chat[i];
+                    await indexSingleMessage(msg, chatId, i, isGroupChat);
+                    indexedMessageIds.add(i);
+                }
+                lastMessageCount = context.chat.length;
+            }
+        } catch (e) {
+            console.warn('[' + MODULE_NAME + '] Polling error:', e.message);
+        }
+    }, 3000);
+}
+
+// ===========================
+// Context Injection Helpers (restored)
+// ===========================
+
+async function injectContextWithSetExtensionPrompt() {
+    if (!extensionSettings.enabled || !extensionSettings.injectContext) return;
+
+    const chatId = getCurrentChatId();
+    if (!chatId) return;
+
+    if (!currentChatIndexed) {
+        const isGroupChat = isCurrentChatGroupChat();
+        const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+        const collectionName = prefix + chatId;
+        try {
+            const pointCount = await countPoints(collectionName);
+            if (pointCount > 0) {
+                currentChatIndexed = true;
+                console.log('[' + MODULE_NAME + '] Found indexed collection with ' + pointCount + ' points');
+            } else {
+                console.log('[' + MODULE_NAME + '] Chat not indexed, skipping injection');
+                return;
+            }
+        } catch (e) {
+            console.log('[' + MODULE_NAME + '] Could not verify collection, skipping injection');
+            return;
+        }
+    }
+
+    let context;
+    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+        context = SillyTavern.getContext();
+    } else if (typeof getContext === 'function') {
+        context = getContext();
+    }
+    if (!context || !context.chat || context.chat.length === 0) return;
+    if (!context.setExtensionPrompt || typeof context.setExtensionPrompt !== 'function') return;
+
+    const lastMessage = getLastRelevantMessage(context);
+    if (!lastMessage || !lastMessage.mes) return;
+
+    let query = lastMessage.mes;
+    if (query.length > 1000) query = query.substring(0, 1000);
+
+    const retrievedContext = await retrieveContext(query, chatId, isCurrentChatGroupChat());
+    if (!retrievedContext) return;
+
+    let position = 1;
+    let depth = 4;
+    if (extensionSettings.injectionPosition === 'before_main') {
+        position = 0; depth = 0;
+    } else if (extensionSettings.injectionPosition === 'after_main') {
+        position = 1; depth = 0;
+    } else if (extensionSettings.injectionPosition === 'after_messages') {
+        position = 1; depth = extensionSettings.injectAfterMessages || 3;
+    }
+
+    const formattedContext = '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]';
+
+    try {
+        context.setExtensionPrompt(MODULE_NAME, formattedContext, position, depth);
+        updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
+    } catch (e) {
+        console.error('[' + MODULE_NAME + '] setExtensionPrompt failed:', e);
+    }
+}
+
+async function injectContextBeforeGeneration(data) {
+    const now = Date.now();
+    if (now - lastInjectionTime < INJECTION_DEBOUNCE_MS) return;
+    if (!data || !data.chat || !Array.isArray(data.chat)) return;
+    if (data.chat.length <= 5) return;
+    if (!extensionSettings.enabled || !extensionSettings.injectContext) return;
+
+    const chatId = getCurrentChatId();
+    if (!chatId) return;
+
+    if (!currentChatIndexed) {
+        const isGroupChat = isCurrentChatGroupChat();
+        const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+        const collectionName = prefix + chatId;
+        try {
+            const pointCount = await countPoints(collectionName);
+            if (pointCount > 0) currentChatIndexed = true;
+            else return;
+        } catch (e) { return; }
+    }
+
+    let context;
+    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+        context = SillyTavern.getContext();
+    } else if (typeof getContext === 'function') {
+        context = getContext();
+    }
+    if (!context || !context.chat || context.chat.length === 0) return;
+
+    const lastMessage = getLastRelevantMessage(context);
+    if (!lastMessage || !lastMessage.mes) return;
+
+    let query = lastMessage.mes;
+    if (query.length > 1000) query = query.substring(0, 1000);
+
+    const retrievedContext = await retrieveContext(query, chatId, isCurrentChatGroupChat());
+    if (!retrievedContext) return;
+
+    const ragMessage = {
+        role: 'system',
+        content: '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]'
+    };
+
+    let insertIndex = 0;
+    if (extensionSettings.injectionPosition === 'before_main') {
+        insertIndex = 0;
+    } else if (extensionSettings.injectionPosition === 'after_main') {
+        for (let i = 0; i < data.chat.length; i++) {
+            if (data.chat[i].role === 'user' || data.chat[i].role === 'assistant') {
+                insertIndex = i;
+                break;
+            }
+            insertIndex = i + 1;
+        }
+    } else if (extensionSettings.injectionPosition === 'after_messages') {
+        const depth = extensionSettings.injectAfterMessages || 3;
+        insertIndex = Math.max(0, data.chat.length - depth);
+    }
+
+    data.chat.splice(insertIndex, 0, ragMessage);
+    lastInjectionTime = Date.now();
+    updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
+}
+
+// ===========================
+// UI Functions
+// ===========================
+
+function showStopButton() {
+    const btn = document.getElementById('ragfordummies_stop_indexing');
+    if (btn) {
+        btn.classList.add('active');
+        console.log('[' + MODULE_NAME + '] Stop button shown');
+    }
+}
+
+function hideStopButton() {
+    const btn = document.getElementById('ragfordummies_stop_indexing');
+    if (btn) {
+        btn.classList.remove('active');
+    }
+}
+
+function updateUI(element, value) {
+    const el = document.getElementById('ragfordummies_' + element);
+    if (el) {
+        if (element === 'status') {
+            el.textContent = value;
+        } else {
+            el.value = value;
+        }
+    }
+}
+
+function createSettingsUI() {
+    const html = 
+        '<div id="ragfordummies_container" class="inline-drawer">' +
+            '<div class="inline-drawer-toggle inline-drawer-header">' +
+                '<b>RagForDummies</b>' +
+                '<div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>' +
+            '</div>' +
+            '<div class="inline-drawer-content">' +
+                '<div class="ragfordummies-settings">' +
+                    '<div class="ragfordummies-section">' +
+                        '<label class="checkbox_label">' +
+                            '<input type="checkbox" id="ragfordummies_enabled" ' + (extensionSettings.enabled ? 'checked' : '') + ' />' +
+                            'Enable RAG' +
+                        '</label>' +
+                    '</div>' +
+                    
+                    '<div class="ragfordummies-section">' +
+                        '<h4>Qdrant Configuration</h4>' +
+                        '<label>' +
+                            '<span>Local URL:</span>' +
+                            '<input type="text" id="ragfordummies_qdrant_local_url" value="' + extensionSettings.qdrantLocalUrl + '" placeholder="http://localhost:6333" />' +
+                        '</label>' +
+                    '</div>' +
+                    
+                    '<div class="ragfordummies-section">' +
+                        '<h4>Embedding Provider</h4>' +
+                        '<label>' +
+                            '<span>Provider:</span>' +
+                            '<select id="ragfordummies_embedding_provider">' +
+                                '<option value="kobold" ' + (extensionSettings.embeddingProvider === 'kobold' ? 'selected' : '') + '>KoboldCpp</option>' +
+                                '<option value="ollama" ' + (extensionSettings.embeddingProvider === 'ollama' ? 'selected' : '') + '>Ollama</option>' +
+                                '<option value="openai" ' + (extensionSettings.embeddingProvider === 'openai' ? 'selected' : '') + '>OpenAI</option>' +
+                            '</select>' +
+                        '</label>' +
+                        
+                        '<label id="ragfordummies_kobold_settings" style="' + (extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none') + '">' +
+                            '<span>KoboldCpp URL:</span>' +
+                            '<input type="text" id="ragfordummies_kobold_url" value="' + extensionSettings.koboldUrl + '" placeholder="http://localhost:11434" />' +
+                        '</label>' +
+                        
+                        '<div id="ragfordummies_ollama_settings" style="' + (extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none') + '">' +
+                            '<label>' +
+                                '<span>Ollama URL:</span>' +
+                                '<input type="text" id="ragfordummies_ollama_url" value="' + extensionSettings.ollamaUrl + '" placeholder="http://localhost:11434" />' +
+                            '</label>' +
+                            '<label>' +
+                                '<span>Ollama Model:</span>' +
+                                '<input type="text" id="ragfordummies_ollama_model" value="' + extensionSettings.ollamaModel + '" placeholder="nomic-embed-text" />' +
+                            '</label>' +
+                        '</div>' +
+                        
+                        '<div id="ragfordummies_openai_settings" style="' + (extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none') + '">' +
+                            '<label>' +
+                                '<span>OpenAI API Key:</span>' +
+                                '<input type="password" id="ragfordummies_openai_api_key" value="' + extensionSettings.openaiApiKey + '" placeholder="sk-..." />' +
+                            '</label>' +
+                            '<label>' +
+                                '<span>OpenAI Model:</span>' +
+                                '<input type="text" id="ragfordummies_openai_model" value="' + extensionSettings.openaiModel + '" placeholder="text-embedding-3-small" />' +
+                            '</label>' +
+                        '</div>' +
+                    '</div>' +
+                    
+                    '<div class="ragfordummies-section">' +
+                        '<h4>RAG Settings</h4>' +
+                        '<label>' +
+                            '<span>Retrieval Count:</span>' +
+                            '<input type="number" id="ragfordummies_retrieval_count" value="' + extensionSettings.retrievalCount + '" min="1" max="20" />' +
+                        '</label>' +
+                        
+                        '<label>' +
+                            '<span>Similarity Threshold:</span>' +
+                            '<input type="number" id="ragfordummies_similarity_threshold" value="' + extensionSettings.similarityThreshold + '" min="0" max="1" step="0.1" />' +
+                        '</label>' +
+                        
+                        '<label class="checkbox_label">' +
+                            '<input type="checkbox" id="ragfordummies_auto_index" ' + (extensionSettings.autoIndex ? 'checked' : '') + ' />' +
+                            'Auto-index on first message' +
+                        '</label>' +
+                        
+                        '<label class="checkbox_label">' +
+                            '<input type="checkbox" id="ragfordummies_inject_context" ' + (extensionSettings.injectContext ? 'checked' : '') + ' />' +
+                            'Inject context into prompt' +
+                        '</label>' +
+                    '</div>' +
+                    
+                    '<div class="ragfordummies-section">' +
+                        '<h4>Context Injection Position</h4>' +
+                        '<label>' +
+                            '<span>Injection Position:</span>' +
+                            '<select id="ragfordummies_injection_position">' +
+                                '<option value="before_main" ' + (extensionSettings.injectionPosition === 'before_main' ? 'selected' : '') + '>Before Main Prompt</option>' +
+                                '<option value="after_main" ' + (extensionSettings.injectionPosition === 'after_main' ? 'selected' : '') + '>After Main Prompt</option>' +
+                                '<option value="after_messages" ' + (extensionSettings.injectionPosition === 'after_messages' ? 'selected' : '') + '>After X Messages</option>' +
+                            '</select>' +
+                        '</label>' +
+                        
+                        '<label id="ragfordummies_inject_after_messages_setting" style="' + (extensionSettings.injectionPosition === 'after_messages' ? '' : 'display:none') + '">' +
+                            '<span>Messages from End:</span>' +
+                            '<input type="number" id="ragfordummies_inject_after_messages" value="' + extensionSettings.injectAfterMessages + '" min="0" max="50" />' +
+                            '<small style="opacity:0.7; display:block; margin-top:5px;">0 = at the very end, 3 = after last 3 messages</small>' +
+                        '</label>' +
+                    '</div>' +
+                    
+                    '<div class="ragfordummies-section">' +
+                        '<h4>Connection Tests</h4>' +
+                        '<button id="ragfordummies_test_qdrant" class="menu_button">Test Qdrant Connection</button>' +
+                        '<button id="ragfordummies_test_embedding" class="menu_button">Test Embedding Provider</button>' +
+                        '<button id="ragfordummies_test_retrieval" class="menu_button">Test Context Retrieval</button>' +
+                        '<button id="ragfordummies_test_injection" class="menu_button">Test Context Injection</button>' +
+                        '<hr style="border-color: var(--SmartThemeBorderColor); margin: 10px 0;" />' +
+                        '<label>' +
+                            '<span>Hybrid Search Test Query:</span>' +
+                            '<input type="text" id="ragfordummies_hybrid_test_query" placeholder="e.g. What did Alice say about the garden?" style="width: 100%;" />' +
+                        '</label>' +
+                        '<button id="ragfordummies_test_hybrid" class="menu_button">Test Hybrid Search</button>' +
+                        '<pre id="ragfordummies_hybrid_results" style="background: var(--black70a); padding: 10px; border-radius: 5px; font-size: 0.8em; max-height: 300px; overflow-y: auto; white-space: pre-wrap; display: none;"></pre>' +
+                    '</div>' +
+                    
+                    '<div class="ragfordummies-section">' +
+                        '<h4>Manual Operations</h4>' +
+                        '<button id="ragfordummies_index_current" class="menu_button">Index Current Chat</button>' +
+                        '<button id="ragfordummies_force_reindex" class="menu_button">Force Re-index (Rebuild)</button>' +
+                        '<button id="ragfordummies_stop_indexing" class="menu_button ragfordummies-stop-btn">Stop Indexing</button>' +
+                        '<hr style="border-color: var(--SmartThemeBorderColor); margin: 10px 0;" />' +
+                        '<label class="checkbox_label" style="margin-bottom: 8px;">' +
+                            '<input type="checkbox" id="ragfordummies_merge_uploads" checked />' +
+                            '<span>Merge uploads into current chat collection</span>' +
+                        '</label>' +
+                        '<button id="ragfordummies_upload_btn" class="menu_button">Upload File (JSONL or txt)</button>' +
+                        '<input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" />' +
+                        '<div id="ragfordummies_status" class="ragfordummies-status">Ready</div>' +
+                    '</div>' +
+                '</div>' +
+            '</div>' +
+        '</div>';
+    
+    return html;
+}
+
+function attachEventListeners() {
+    const settingIds = [
+        'enabled', 'qdrant_local_url',
+        'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
+        'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold',
+        'auto_index', 'inject_context', 'injection_position', 'inject_after_messages'
+    ];
+    
+    settingIds.forEach(function(id) {
+        const element = document.getElementById('ragfordummies_' + id);
+        if (element) {
+            element.addEventListener('change', function() {
+                const key = id.replace(/_([a-z])/g, function(m, l) { return l.toUpperCase(); });
+                
+                if (element.type === 'checkbox') {
+                    extensionSettings[key] = element.checked;
+                    
+                    if (id === 'auto_index') {
+                        if (element.checked && typeof eventSource === 'undefined' && !pollingInterval) {
+                            console.log('[' + MODULE_NAME + '] Auto-index enabled, starting polling');
+                            startPolling();
+                        } else if (!element.checked && pollingInterval) {
+                            console.log('[' + MODULE_NAME + '] Auto-index disabled, stopping polling');
+                            clearInterval(pollingInterval);
+                            pollingInterval = null;
+                        }
+                    }
+                } else if (element.type === 'number') {
+                    extensionSettings[key] = parseFloat(element.value);
+                } else {
+                    extensionSettings[key] = element.value;
+                }
+                
+                saveSettings();
+            });
+        }
+    });
+    
+    const providerSelect = document.getElementById('ragfordummies_embedding_provider');
+    if (providerSelect) {
+        providerSelect.addEventListener('change', function() {
+            const provider = providerSelect.value;
+            document.getElementById('ragfordummies_kobold_settings').style.display = provider === 'kobold' ? '' : 'none';
+            document.getElementById('ragfordummies_ollama_settings').style.display = provider === 'ollama' ? '' : 'none';
+            document.getElementById('ragfordummies_openai_settings').style.display = provider === 'openai' ? '' : 'none';
+        });
+    }
+    
+    const injectionPositionSelect = document.getElementById('ragfordummies_injection_position');
+    if (injectionPositionSelect) {
+        injectionPositionSelect.addEventListener('change', function() {
+            const position = injectionPositionSelect.value;
+            const messagesField = document.getElementById('ragfordummies_inject_after_messages_setting');
+            if (messagesField) {
+                messagesField.style.display = position === 'after_messages' ? '' : 'none';
+            }
+        });
+    }
+    
+    const testQdrantBtn = document.getElementById('ragfordummies_test_qdrant');
+    if (testQdrantBtn) {
+        testQdrantBtn.addEventListener('click', async function() {
+            updateUI('status', 'Testing Qdrant connection...');
+            try {
+                const result = await qdrantRequest('/collections');
+                updateUI('status', '✓ Qdrant connected! Found ' + result.result.collections.length + ' collections');
+                console.log('[' + MODULE_NAME + '] Qdrant test successful:', result);
+            } catch (error) {
+                updateUI('status', '✗ Qdrant connection failed: ' + error.message);
+                console.error('[' + MODULE_NAME + '] Qdrant test failed:', error);
+            }
+        });
+    }
+    
+    const testEmbeddingBtn = document.getElementById('ragfordummies_test_embedding');
+    if (testEmbeddingBtn) {
+        testEmbeddingBtn.addEventListener('click', async function() {
+            updateUI('status', 'Testing embedding provider...');
+            try {
+                const embedding = await generateEmbedding('This is a test message');
+                updateUI('status', '✓ Embedding provider working! Vector size: ' + embedding.length);
+                console.log('[' + MODULE_NAME + '] Embedding test successful, dimension:', embedding.length);
+            } catch (error) {
+                updateUI('status', '✗ Embedding failed: ' + error.message);
+                console.error('[' + MODULE_NAME + '] Embedding test failed:', error);
+            }
+        });
+    }
+    
+    const testRetrievalBtn = document.getElementById('ragfordummies_test_retrieval');
+    if (testRetrievalBtn) {
+        testRetrievalBtn.addEventListener('click', async function() {
+            updateUI('status', 'Testing context retrieval...');
+            try {
+                const chatId = getCurrentChatId();
+                if (!chatId) {
+                    updateUI('status', '✗ No active chat found');
+                    return;
+                }
+                if (!currentChatIndexed) {
+                    updateUI('status', '✗ Chat not indexed yet. Click "Index Current Chat" first.');
+                    return;
+                }
+                
+                const isGroupChat = isCurrentChatGroupChat();
+                const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+                const collectionName = prefix + chatId;
+                
+                const pointCount = await countPoints(collectionName);
+                if (pointCount === 0) {
+                    updateUI('status', '✗ Collection is empty! Re-index the chat.');
+                    return;
+                }
+                
+                const context = SillyTavern.getContext();
+                const lastMessage = getLastRelevantMessage(context);
+                if (!lastMessage) {
+                    updateUI('status', '✗ No valid message found');
+                    return;
+                }
+                let query = lastMessage.mes;
+                if (query.length > 1000) query = query.substring(0, 1000);
+                
+                const retrievedContext = await retrieveContext(query, chatId, isGroupChat);
+                if (retrievedContext) {
+                    updateUI('status', '✓ Retrieved ' + retrievedContext.length + ' chars of context');
+                    console.log(retrievedContext);
+                } else {
+                    updateUI('status', '✗ No context found - try lowering similarity threshold');
+                }
+            } catch (error) {
+                updateUI('status', '✗ Retrieval failed: ' + error.message);
+                console.error('[' + MODULE_NAME + '] TEST FAILED -', error);
+            }
+        });
+    }
+    
+    const testInjectionBtn = document.getElementById('ragfordummies_test_injection');
+    if (testInjectionBtn) {
+        testInjectionBtn.addEventListener('click', async function() {
+            updateUI('status', 'Testing context injection...');
+            if (!currentChatIndexed) {
+                updateUI('status', '✗ Chat not indexed. Index first.');
+                return;
+            }
+            await injectContextBeforeGeneration();
+            updateUI('status', 'Injection attempted (see console)');
+        });
+    }
+    
+    const testHybridBtn = document.getElementById('ragfordummies_test_hybrid');
+    if (testHybridBtn) {
+        testHybridBtn.addEventListener('click', async function() {
+            const resultsDiv = document.getElementById('ragfordummies_hybrid_results');
+            const queryInput = document.getElementById('ragfordummies_hybrid_test_query');
+            
+            let output = '';
+            function log(msg) {
+                output += msg + '\n';
+                if (resultsDiv) {
+                    resultsDiv.textContent = output;
+                    resultsDiv.style.display = 'block';
+                }
+                console.log('[' + MODULE_NAME + '] ' + msg);
+            }
+            
+            try {
+                log('===== HYBRID SEARCH TEST =====');
+                
+                const chatId = getCurrentChatId();
+                if (!chatId) {
+                    log('✗ ERROR: No active chat found');
+                    updateUI('status', '✗ No active chat');
+                    return;
+                }
+                log('Chat ID: ' + chatId);
+                
+                const isGroupChat = isCurrentChatGroupChat();
+                const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+                const collectionName = prefix + chatId;
+                log('Collection: ' + collectionName);
+                
+                const pointCount = await countPoints(collectionName);
+                log('Indexed messages: ' + pointCount);
+                
+                if (pointCount === 0) {
+                    log('✗ ERROR: Collection is empty! Index the chat first.');
+                    updateUI('status', '✗ Collection empty');
+                    return;
+                }
+                
+                let query = queryInput ? queryInput.value.trim() : '';
+                if (!query) {
+                    const context = SillyTavern.getContext();
+                    const recentMessages = context.chat.slice(-3);
+                    query = recentMessages.map(function(m) { return m.mes; }).join(' ');
+                    log('Using last 3 messages as query (no custom query entered)');
+                }
+                log('');
+                log('Query: "' + query.substring(0, 100) + (query.length > 100 ? '...' : '') + '"');
+                log('');
+                
+                const filterTerms = extractQueryFilterTerms(query);
+                log('===== FILTER TERM EXTRACTION =====');
+                if (filterTerms.length > 0) {
+                    log('Found ' + filterTerms.length + ' filter terms: ' + filterTerms.join(', '));
+                } else {
+                    log('No filter terms found in query');
+                    log('(Will use pure dense search)');
+                }
+                log('');
+                
+                log('Generating query embedding...');
+                updateUI('status', 'Generating embedding...');
+                const queryEmbedding = await generateEmbedding(query);
+                log('Embedding dimensions: ' + queryEmbedding.length);
+                log('');
+                
+                log('===== RUNNING HYBRID SEARCH =====');
+                updateUI('status', 'Running hybrid search...');
+                
+                let filteredResults = [];
+                let denseResults = [];
+                
+                if (filterTerms.length > 0) {
+                    log('RUN 1: Filtered search (term matching)...');
+                    
+                    const filter = {
+                        should: filterTerms.map(function(term) {
+                            return {
+                                key: 'proper_nouns',
+                                match: { value: term }
+                            };
+                        })
+                    };
+                    
+                    try {
+                        const filteredResult = await qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
+                            vector: queryEmbedding,
+                            limit: extensionSettings.retrievalCount * 2,
+                            score_threshold: extensionSettings.similarityThreshold,
+                            with_payload: true,
+                            filter: filter
+                        });
+                        
+                        const rawResults = filteredResult.result || [];
+                        log('Run 1 raw results from Qdrant: ' + rawResults.length);
+                        
+                        filteredResults = rawResults.filter(function(r) {
+                            const resultNouns = r.payload.proper_nouns || [];
+                            const hasMatch = resultNouns.some(function(noun) {
+                                return filterTerms.indexOf(noun) !== -1;
+                            });
+                            return hasMatch;
+                        });
+                        
+                        const falsePositives = rawResults.length - filteredResults.length;
+                        if (falsePositives > 0) {
+                            log('Warning: Filtered out ' + falsePositives + ' false positives (Qdrant filter issue)');
+                        }
+                        log('Run 1 validated results: ' + filteredResults.length);
+                        
+                        if (filteredResults.length > 0) {
+                            filteredResults.forEach(function(r, idx) {
+                                const matchedTerms = (r.payload.proper_nouns || []).filter(function(n) {
+                                    return filterTerms.indexOf(n) !== -1;
+                                });
+                                log('  [' + idx + '] Score: ' + r.score.toFixed(3) + ' | Character: ' + r.payload.character_name + ' | Matched: ' + matchedTerms.join(', '));
+                            });
+                        }
+                    } catch (filterError) {
+                        log('Run 1 FAILED: ' + filterError.message);
+                        log('(This may mean proper_nouns index doesnt exist - try Force Re-index)');
+                    }
+                } else {
+                    log('RUN 1: Skipped (no filter terms to match)');
+                }
+                log('');
+                
+                const requiredFiltered = extensionSettings.retrievalCount || 5;
+                if (filteredResults.length < requiredFiltered) {
+                    log('RUN 2: Dense search (filtered returned ' + filteredResults.length + ' < ' + requiredFiltered + ')...');
+                    
+                    const denseResult = await qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
+                        vector: queryEmbedding,
+                        limit: extensionSettings.retrievalCount,
+                        score_threshold: extensionSettings.similarityThreshold,
+                        with_payload: true
+                    });
+                    
+                    denseResults = denseResult.result || [];
+                    log('Run 2 returned: ' + denseResults.length + ' results');
+                    
+                    if (denseResults.length > 0) {
+                        denseResults.forEach(function(r, idx) {
+                            log('  [' + idx + '] Score: ' + r.score.toFixed(3) + ' | Character: ' + r.payload.character_name);
+                        });
+                    }
+                } else {
+                    log('RUN 2: Skipped (filtered search returned enough results)');
+                }
+                log('');
+                
+                const combined = [];
+                const seenIds = new Set();
+                
+                filteredResults.forEach(function(r) {
+                    if (!seenIds.has(r.id)) {
+                        r._source = 'filtered';
+                        combined.push(r);
+                        seenIds.add(r.id);
+                    }
+                });
+                
+                denseResults.forEach(function(r) {
+                    if (!seenIds.has(r.id)) {
+                        r._source = 'dense';
+                        combined.push(r);
+                        seenIds.add(r.id);
+                    }
+                });
+                
+                combined.sort(function(a, b) { return b.score - a.score; });
+                const finalResults = combined.slice(0, extensionSettings.retrievalCount);
+                
+                log('===== FINAL RESULTS =====');
+                log('Total: ' + finalResults.length + ' results');
+                log('From filtered: ' + finalResults.filter(function(r) { return r._source === 'filtered'; }).length);
+                log('From dense: ' + finalResults.filter(function(r) { return r._source === 'dense'; }).length);
+                log('');
+                
+                if (finalResults.length > 0) {
+                    finalResults.forEach(function(r, idx) {
+                        log('--- Result ' + (idx + 1) + ' [' + r._source.toUpperCase() + '] ---');
+                        log('Score: ' + r.score.toFixed(3));
+                        log('Character: ' + r.payload.character_name);
+                        log('Proper nouns in message: ' + (r.payload.proper_nouns && r.payload.proper_nouns.length > 0 ? r.payload.proper_nouns.join(', ') : '(none)'));
+                        log('Message preview: ' + (r.payload.full_message || '').substring(0, 100) + '...');
+                        log('');
+                    });
+                    
+                    updateUI('status', '✓ Hybrid search complete! ' + finalResults.length + ' results');
+                } else {
+                    log('No results found. Try:');
+                    log('- Lowering similarity threshold (currently ' + extensionSettings.similarityThreshold + ')');
+                    log('- Using different search terms');
+                    log('- Force re-indexing the chat');
+                    updateUI('status', '✗ No results found');
+                }
+                
+                log('===== TEST COMPLETE =====');
+                
+            } catch (error) {
+                log('');
+                log('✗ ERROR: ' + error.message);
+                console.error('[' + MODULE_NAME + '] Hybrid test failed:', error);
+                updateUI('status', '✗ Test failed: ' + error.message);
+            }
+        });
+    }
+    
+    const indexCurrentBtn = document.getElementById('ragfordummies_index_current');
+    if (indexCurrentBtn) {
+        indexCurrentBtn.addEventListener('click', async function() {
+            try {
+                const chatId = getCurrentChatId();
+                if (!chatId) {
+                    updateUI('status', '✗ No active chat found');
+                    return;
+                }
+                
+                const isGroupChat = isCurrentChatGroupChat();
+                const context = SillyTavern.getContext();
+                const jsonl = convertChatToJSONL(context);
+                
+                await indexChat(jsonl, chatId, isGroupChat);
+                currentChatIndexed = true;
+            } catch (error) {
+                updateUI('status', '✗ Indexing failed: ' + error.message);
+                console.error('[' + MODULE_NAME + '] Manual indexing failed:', error);
+            }
+        });
+    }
+    
+    const forceReindexBtn = document.getElementById('ragfordummies_force_reindex');
+    if (forceReindexBtn) {
+        forceReindexBtn.addEventListener('click', async function() {
+            if (!confirm('This will delete the existing index and rebuild it from scratch.\n\nThis is useful after updating the extension to enable hybrid search on older collections.\n\nContinue?')) {
+                return;
+            }
+            
+            try {
+                await forceReindexCurrentChat();
+                updateUI('status', '✓ Force re-index complete!');
+            } catch (error) {
+                updateUI('status', '✗ Force re-index failed: ' + error.message);
+                console.error('[' + MODULE_NAME + '] Force re-index failed:', error);
+            }
+        });
+    }
+    
+    const stopIndexingBtn = document.getElementById('ragfordummies_stop_indexing');
+    if (stopIndexingBtn) {
+        stopIndexingBtn.addEventListener('click', function() {
+            console.log('[' + MODULE_NAME + '] User requested to stop indexing');
+            shouldStopIndexing = true;
+            updateUI('status', 'Stopping... (will stop at next message)');
+        });
+    }
+    
+    const uploadBtn = document.getElementById('ragfordummies_upload_btn');
+    const fileInput = document.getElementById('ragfordummies_file_input');
+    
+    if (uploadBtn && fileInput) {
+        uploadBtn.addEventListener('click', function() { fileInput.click(); });
+        
+        fileInput.addEventListener('change', async function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            try {
+                const content = await file.text();
+                
+                const isTxt = /\.txt$/i.test(file.name);
+                const isJsonl = /\.jsonl$/i.test(file.name);
+                if (!isTxt && !isJsonl) {
+                    throw new Error('Unsupported file type. Please upload .jsonl or .txt');
+                }
+                
+                const mergeCheckbox = document.getElementById('ragfordummies_merge_uploads');
+                const shouldMerge = mergeCheckbox && mergeCheckbox.checked;
+                
+                let targetChatId;
+                let targetIsGroupChat;
+                
+                if (shouldMerge) {
+                    targetChatId = getCurrentChatId();
+                    targetIsGroupChat = isCurrentChatGroupChat();
+                    
+                    if (!targetChatId) {
+                        throw new Error('No active chat to merge into. Open a chat first or uncheck "Merge uploads".');
+                    }
+                    
+                    console.log('[' + MODULE_NAME + '] Merging uploaded file into current collection: ' + targetChatId);
+                    updateUI('status', 'Merging into current chat collection...');
+                } else {
+                    targetChatId = Date.now();
+                    targetIsGroupChat = false;
+                    console.log('[' + MODULE_NAME + '] Creating separate collection for uploaded file: ' + targetChatId);
+                }
+                
+                let jsonlToIndex = '';
+                
+                if (isTxt) {
+                    jsonlToIndex = convertTextToJSONL(content);
+                } else {
+                    jsonlToIndex = content;
+                    if (!shouldMerge) {
+                        const parsed = parseJSONL(content);
+                        if (parsed.chatMetadata && parsed.chatMetadata.chat_id_hash) {
+                            targetChatId = parsed.chatMetadata.chat_id_hash;
+                        }
+                    }
+                }
+                
+                await indexChat(jsonlToIndex, targetChatId, targetIsGroupChat);
+                
+                if (shouldMerge) {
+                    const count = isTxt ? jsonlToIndex.split('\n').length : parseJSONL(jsonlToIndex).messages.length;
+                    updateUI('status', '✓ Merged ' + count + ' messages into current chat!');
+                } else {
+                    updateUI('status', '✓ Uploaded file indexed into its own collection');
+                }
+            } catch (error) {
+                console.error('[' + MODULE_NAME + '] Upload failed:', error);
+                updateUI('status', 'Upload failed: ' + error.message);
+            }
+            
+            fileInput.value = '';
+        });
+    }
+}
+
+function saveSettings() {
+    localStorage.setItem(MODULE_NAME + '_settings', JSON.stringify(extensionSettings));
+    console.log('[' + MODULE_NAME + '] Settings saved');
+}
+
+function loadSettings() {
+    const saved = localStorage.getItem(MODULE_NAME + '_settings');
+    if (saved) {
+        try {
+            extensionSettings = Object.assign({}, defaultSettings, JSON.parse(saved));
+            console.log('[' + MODULE_NAME + '] Settings loaded');
+        } catch (error) {
+            console.error('[' + MODULE_NAME + '] Failed to load settings:', error);
+        }
+    }
+}
+
+// ===========================
+// Extension Initialization
+// ===========================
+
+async function init() {
+    loadSettings();
+    
+    if (pollingInterval) {
+        console.log('[' + MODULE_NAME + '] Clearing existing polling interval from previous load');
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+    }
+    usePolling = false;
+    
+    const settingsHtml = createSettingsUI();
+    $('#extensions_settings').append(settingsHtml);
+    
+    setTimeout(function() {
+        const container = $('#ragfordummies_container');
+        const toggle = $('#ragfordummies_container .inline-drawer-toggle');
+        const content = $('#ragfordummies_container .inline-drawer-content');
+        
+        console.log('[' + MODULE_NAME + '] Container found:', container.length);
+        console.log('[' + MODULE_NAME + '] Toggle found:', toggle.length);
+        console.log('[' + MODULE_NAME + '] Content found:', content.length);
+        
+        if (toggle.length === 0) {
+            console.error('[' + MODULE_NAME + '] Toggle not found!');
+            return;
+        }
+        
+        content.hide();
+        
+        toggle.off('click').on('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const icon = $(this).find('.inline-drawer-icon');
+            const targetContent = $('#ragfordummies_container .inline-drawer-content');
+            
+            icon.toggleClass('down up');
+            targetContent.slideToggle(200);
+        });
+        
+        console.log('[' + MODULE_NAME + '] Dropdown handler attached');
+    }, 200);
+    
+    attachEventListeners();
+    
+    console.log('[' + MODULE_NAME + '] Registering event handlers...');
+    
+    let eventSourceToUse = null;
+    
+    if (typeof eventSource !== 'undefined') {
+        console.log('[' + MODULE_NAME + '] Using global eventSource');
+        eventSourceToUse = eventSource;
+    } else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+        const context = SillyTavern.getContext();
+        if (context.eventSource) {
+            console.log('[' + MODULE_NAME + '] Using context.eventSource');
+            eventSourceToUse = context.eventSource;
+        }
+    }
+    
+    if (eventSourceToUse) {
+        console.log('[' + MODULE_NAME + '] Registering event listeners on eventSource');
+        
+        eventSourceToUse.on('chat_loaded', onChatLoaded);
+        eventSourceToUse.on('message_sent', onMessageSent);
+        eventSourceToUse.on('message_received', onMessageReceived);
+        eventSourceToUse.on('message_swiped', onMessageSwiped);
+        eventSourceToUse.on('message_deleted', onMessageDeleted);
+        
+        if (typeof injectContextWithSetExtensionPrompt === 'function') {
+            eventSourceToUse.on('GENERATION_AFTER_COMMANDS', async function(data) {
+                console.log('[' + MODULE_NAME + '] Event: GENERATION_AFTER_COMMANDS');
+                await injectContextWithSetExtensionPrompt();
+            });
+            
+            eventSourceToUse.on('generate_before_combine_prompts', async function(data) {
+                console.log('[' + MODULE_NAME + '] Event: generate_before_combine_prompts');
+                await injectContextWithSetExtensionPrompt();
+            });
+        } else {
+            console.warn('[' + MODULE_NAME + '] injectContextWithSetExtensionPrompt is undefined; skipping wiring.');
+        }
+        
+        eventSourceToUse.on('chat_completion_prompt_ready', async function(data) {
+            console.log('[' + MODULE_NAME + '] Event: chat_completion_prompt_ready (chat length: ' + (data && data.chat ? data.chat.length : 'N/A') + ')');
+        });
+        
+        console.log('[' + MODULE_NAME + '] Registered listeners for: GENERATION_AFTER_COMMANDS, generate_before_combine_prompts');
+        
+        eventsRegistered = true;
+        usePolling = false;
+        
+        console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
+        
+        if (eventSourceToUse._events) {
+            console.log('[' + MODULE_NAME + '] All registered events on eventSource:', Object.keys(eventSourceToUse._events));
+        }
+    } else {
+        console.log('[' + MODULE_NAME + '] eventSource not available');
+        eventsRegistered = false;
+        usePolling = true;
+    }
+    
+    if (typeof window.generateQuietPrompt !== 'undefined') {
+        console.log('[' + MODULE_NAME + '] Hooking generateQuietPrompt');
+        const originalGenerate = window.generateQuietPrompt;
+        window.generateQuietPrompt = function() {
+            onMessageSent({ fromHook: true });
+            return originalGenerate.apply(this, arguments);
+        };
+    }
+    
+    console.log('[' + MODULE_NAME + '] Available globals:', {
+        eventSource: typeof eventSource !== 'undefined',
+        SillyTavern: typeof SillyTavern !== 'undefined',
+        getContext: typeof getContext !== 'undefined',
+        setExtensionPrompt: typeof setExtensionPrompt !== 'undefined',
+        extension_prompts: typeof extension_prompts !== 'undefined',
+        generateQuietPrompt: typeof window.generateQuietPrompt !== 'undefined'
+    });
+    
+    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+        const context = SillyTavern.getContext();
+        console.log('[' + MODULE_NAME + '] context.eventSource exists:', !!context.eventSource);
+        console.log('[' + MODULE_NAME + '] context.setExtensionPrompt exists:', !!context.setExtensionPrompt);
+    }
+    
+    console.log('[' + MODULE_NAME + '] =========================================');
+    
+    if (!eventsRegistered && usePolling) {
+        console.log('[' + MODULE_NAME + '] Events not available, using polling fallback');
+        
+        if (extensionSettings.autoIndex) {
+            await startPolling();
+        } else {
+            console.log('[' + MODULE_NAME + '] Auto-index disabled, polling not started');
+        }
+    } else if (eventsRegistered) {
+        console.log('[' + MODULE_NAME + '] Events registered, polling NOT started (not needed)');
+    }
+    
+    setTimeout(async function() {
+        console.log('[' + MODULE_NAME + '] Running initial index status check...');
+        const chatId = getCurrentChatId();
+        if (chatId && !currentChatIndexed) {
+            const isGroupChat = isCurrentChatGroupChat();
+            const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+            const collectionName = prefix + chatId;
+            
+            try {
+                const pointCount = await countPoints(collectionName);
+                if (pointCount > 0) {
+                    currentChatIndexed = true;
+                    console.log('[' + MODULE_NAME + '] Initial check: Collection exists with ' + pointCount + ' points - marking as indexed');
+                    updateUI('status', '✓ Indexed (' + pointCount + ' messages)');
+                } else {
+                    console.log('[' + MODULE_NAME + '] Initial check: Collection empty or not found');
+                    updateUI('status', 'Ready to index');
+                }
+            } catch (checkError) {
+                console.log('[' + MODULE_NAME + '] Initial check: Could not verify collection -', checkError.message);
+            }
+        } else if (currentChatIndexed) {
+            console.log('[' + MODULE_NAME + '] Initial check: Already marked as indexed');
+        } else {
+            console.log('[' + MODULE_NAME + '] Initial check: No chat ID available yet');
+        }
+    }, 500);
+    
+    console.log('[' + MODULE_NAME + '] Extension loaded successfully');
+    console.log('[' + MODULE_NAME + '] eventsRegistered=' + eventsRegistered + ', usePolling=' + usePolling);
+    updateUI('status', 'Extension loaded - Test connections');
+}
+
+jQuery(async function() {
+    setTimeout(async function() {
+        await init();
+    }, 100);
+});
