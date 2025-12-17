@@ -46,7 +46,7 @@ const INJECTION_DEBOUNCE_MS = 1000; // Minimum time between injections
 function generateUUID() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        const v = c === 'x' ? r : (r & 0x3 | 8);
         return v.toString(16);
     });
 }
@@ -1617,6 +1617,29 @@ function convertChatToJSONL(context) {
     return lines.join('\n');
 }
 
+// NEW: Convert plain text to JSONL (paragraphs → messages)
+function convertTextToJSONL(text) {
+    // Split on blank lines; fallback to single lines if no double newlines
+    let chunks = text.split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
+    if (chunks.length === 0) {
+        chunks = text.split('\n').map(s => s.trim()).filter(Boolean);
+    }
+    const lines = [];
+    chunks.forEach((chunk, idx) => {
+        lines.push(JSON.stringify({
+            name: 'ImportedText',
+            is_user: true,
+            mes: chunk,
+            send_date: new Date().toISOString(),
+            extra: {},
+            tracker: {},
+            present: [],
+            index: idx
+        }));
+    });
+    return lines.join('\n');
+}
+
 // ===========================
 // UI Functions
 // ===========================
@@ -1795,7 +1818,7 @@ function createSettingsUI() {
                             '<span>Merge uploads into current chat collection</span>' +
                         '</label>' +
                         '<button id="ragfordummies_upload_btn" class="menu_button">Upload Chat JSONL</button>' +
-                        '<input type="file" id="ragfordummies_file_input" accept=".jsonl" style="display:none" />' +
+                        '<input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" />' +
                         '<div id="ragfordummies_status" class="ragfordummies-status">Ready</div>' +
                     '</div>' +
                 '</div>' +
@@ -2432,10 +2455,15 @@ function attachEventListeners() {
             
             try {
                 const content = await file.text();
-                const parsed = parseJSONL(content);
-                const chatMetadata = parsed.chatMetadata;
                 
-                // Check if we should merge into current chat
+                // Detect file type by extension
+                const isTxt = /\.txt$/i.test(file.name);
+                const isJsonl = /\.jsonl$/i.test(file.name);
+                if (!isTxt && !isJsonl) {
+                    throw new Error('Unsupported file type. Please upload .jsonl or .txt');
+                }
+                
+                // Decide target collection
                 const mergeCheckbox = document.getElementById('ragfordummies_merge_uploads');
                 const shouldMerge = mergeCheckbox && mergeCheckbox.checked;
                 
@@ -2443,7 +2471,6 @@ function attachEventListeners() {
                 let targetIsGroupChat;
                 
                 if (shouldMerge) {
-                    // Use CURRENT chat's collection
                     targetChatId = getCurrentChatId();
                     targetIsGroupChat = isCurrentChatGroupChat();
                     
@@ -2451,20 +2478,38 @@ function attachEventListeners() {
                         throw new Error('No active chat to merge into. Open a chat first or uncheck "Merge uploads".');
                     }
                     
-                    console.log('[' + MODULE_NAME + '] Merging uploaded chat into current collection: ' + targetChatId);
+                    console.log('[' + MODULE_NAME + '] Merging uploaded file into current collection: ' + targetChatId);
                     updateUI('status', 'Merging into current chat collection...');
                 } else {
-                    // Use the uploaded file's chat ID (creates separate collection)
-                    targetChatId = (chatMetadata && chatMetadata.chat_id_hash) ? chatMetadata.chat_id_hash : Date.now();
-                    targetIsGroupChat = file.name.indexOf('group') !== -1 || (chatMetadata && chatMetadata.groupId !== undefined);
-                    
-                    console.log('[' + MODULE_NAME + '] Creating separate collection for uploaded chat: ' + targetChatId);
+                    targetChatId = Date.now();
+                    targetIsGroupChat = false;
+                    console.log('[' + MODULE_NAME + '] Creating separate collection for uploaded file: ' + targetChatId);
                 }
                 
-                await indexChat(content, targetChatId, targetIsGroupChat);
+                let jsonlToIndex = '';
+                
+                if (isTxt) {
+                    // Convert text -> JSONL
+                    jsonlToIndex = convertTextToJSONL(content);
+                } else {
+                    // JSONL path
+                    jsonlToIndex = content;
+                    if (!shouldMerge) {
+                        // Try to extract chat_id_hash for a separate collection
+                        const parsed = parseJSONL(content);
+                        if (parsed.chatMetadata && parsed.chatMetadata.chat_id_hash) {
+                            targetChatId = parsed.chatMetadata.chat_id_hash;
+                        }
+                    }
+                }
+                
+                await indexChat(jsonlToIndex, targetChatId, targetIsGroupChat);
                 
                 if (shouldMerge) {
-                    updateUI('status', '✓ Merged ' + parsed.messages.length + ' messages into current chat!');
+                    const count = isTxt ? jsonlToIndex.split('\n').length : parseJSONL(jsonlToIndex).messages.length;
+                    updateUI('status', '✓ Merged ' + count + ' messages into current chat!');
+                } else {
+                    updateUI('status', '✓ Uploaded file indexed into its own collection');
                 }
             } catch (error) {
                 console.error('[' + MODULE_NAME + '] Upload failed:', error);
