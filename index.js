@@ -174,30 +174,22 @@ function extractProperNouns(text) {
         'slight', 'slightly', 'brief', 'briefly', 'quick', 'slow', 'sudden', 'careful', 'carefully'
     ]);
     
-    // Split into sentences - include:
-    // - Standard punctuation: . ! ?
-    // - Quotes: " ' "
-    // - Asterisks: * (roleplay action markers)
     const sentences = text.split(/[.!?*]+|["'"]\s*/);
     
     for (let i = 0; i < sentences.length; i++) {
         const sentence = sentences[i].trim();
         if (!sentence) continue;
         
-        // Split sentence into words
         const words = sentence.split(/\s+/);
         
-        // Skip first word (sentence start), check rest for capitals
         for (let j = 1; j < words.length; j++) {
             const word = words[j];
             
-            // Skip if word comes right after an opening quote within the sentence
             if (j > 0) {
                 const prevWord = words[j-1];
                 if (prevWord && /["'"]$/.test(prevWord)) continue;
             }
             
-            // Skip contractions and possessives
             if (word.indexOf("'") !== -1) continue;
             if (/^\d/.test(word)) continue;
             if (/\d/.test(word) && /[a-zA-Z]/.test(word)) continue;
@@ -259,7 +251,6 @@ function extractQueryFilterTerms(text) {
         'much', 'many', 'lot', 'lots', 'bit', 'kind', 'sort', 'type', 'way', 'thing', 'things'
     ]);
     
-    // Clean and split the query into words
     const words = text.toLowerCase().split(/\s+/);
     
     for (const word of words) {
@@ -885,6 +876,7 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
         
         const queryEmbedding = await generateEmbedding(query);
         
+        // Hybrid search
         const results = await searchVectors(
             collectionName,
             queryEmbedding,
@@ -897,11 +889,40 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
             console.log('[' + MODULE_NAME + '] No relevant context found');
             return '';
         }
+
+        // Determine the character we’re replying as (assistant/main character)
+        const activeChar = getActiveCharacterName();
+        let filteredByPresence = results;
+
+        if (activeChar) {
+            const target = activeChar.toLowerCase();
+            filteredByPresence = results.filter(r => {
+                const cp = r.payload && Array.isArray(r.payload.characters_present) ? r.payload.characters_present : [];
+                return cp.some(name => String(name).toLowerCase() === target);
+            });
+            if (filteredByPresence.length !== results.length) {
+                console.log('[' + MODULE_NAME + '] Filtered out ' + (results.length - filteredByPresence.length) + ' result(s) where "' + activeChar + '" was not present');
+            }
+        } else {
+            // If we cannot determine active character, keep previous behavior but still remove empty characters_present
+            filteredByPresence = results.filter(r => {
+                const cp = r.payload && Array.isArray(r.payload.characters_present) ? r.payload.characters_present : [];
+                return cp.length > 0;
+            });
+            if (filteredByPresence.length !== results.length) {
+                console.log('[' + MODULE_NAME + '] Filtered out ' + (results.length - filteredByPresence.length) + ' result(s) with no characters_present');
+            }
+        }
+
+        if (filteredByPresence.length === 0) {
+            console.log('[' + MODULE_NAME + '] No context left after characters_present filter');
+            return '';
+        }
         
-        console.log('[' + MODULE_NAME + '] Retrieved ' + results.length + ' messages with scores:', 
-            results.map(function(r) { return r.score.toFixed(3); }).join(', '));
+        console.log('[' + MODULE_NAME + '] Retrieved ' + filteredByPresence.length + ' messages with scores:',
+            filteredByPresence.map(function(r) { return r.score.toFixed(3); }).join(', '));
         
-        const contextParts = results.map(function(result) {
+        const contextParts = filteredByPresence.map(function(result) {
             const p = result.payload;
             const score = result.score;
             const source = result._source || 'unknown';
@@ -965,6 +986,26 @@ function getCurrentChatId() {
         console.error('[' + MODULE_NAME + '] Error getting chat ID:', error);
         return null;
     }
+}
+
+function getActiveCharacterName() {
+    try {
+        let context = null;
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            context = SillyTavern.getContext();
+        } else if (typeof getContext === 'function') {
+            context = getContext();
+        }
+        if (!context) return null;
+
+        // Common places SillyTavern stores the main/assistant character
+        if (context.character && context.character.name) return context.character.name;
+        if (context.chatMetadata && context.chatMetadata.character_name) return context.chatMetadata.character_name;
+        if (context.main && context.main.name) return context.main.name;
+    } catch (e) {
+        console.warn('[' + MODULE_NAME + '] getActiveCharacterName failed:', e);
+    }
+    return null;
 }
 
 function isCurrentChatGroupChat() {
@@ -1188,6 +1229,151 @@ async function onMessageDeleted(data) {
     await deleteMessageByIndex(collectionName, chatId, messageIndex);
     indexedMessageIds.delete(messageIndex);
     console.log('[' + MODULE_NAME + '] Delete: removed message_index=' + messageIndex);
+}
+
+// ===========================
+// Context Injection Helpers (restored)
+// ===========================
+
+async function injectContextWithSetExtensionPrompt() {
+    if (!extensionSettings.enabled || !extensionSettings.injectContext) return;
+
+    const chatId = getCurrentChatId();
+    if (!chatId) return;
+
+    if (!currentChatIndexed) {
+        const isGroupChat = isCurrentChatGroupChat();
+        const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+        const collectionName = prefix + chatId;
+        try {
+            const pointCount = await countPoints(collectionName);
+            if (pointCount > 0) {
+                currentChatIndexed = true;
+                console.log('[' + MODULE_NAME + '] Found indexed collection with ' + pointCount + ' points');
+            } else {
+                console.log('[' + MODULE_NAME + '] Chat not indexed, skipping injection');
+                return;
+            }
+        } catch (e) {
+            console.log('[' + MODULE_NAME + '] Could not verify collection, skipping injection');
+            return;
+        }
+    }
+
+    let context;
+    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+        context = SillyTavern.getContext();
+    } else if (typeof getContext === 'function') {
+        context = getContext();
+    }
+    if (!context || !context.chat || context.chat.length === 0) return;
+    if (!context.setExtensionPrompt || typeof context.setExtensionPrompt !== 'function') return;
+
+    let lastMessage = null;
+    for (let i = context.chat.length - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (msg.mes && !msg.is_system && msg.mes.trim().length > 0) {
+            lastMessage = msg;
+            break;
+        }
+    }
+    if (!lastMessage || !lastMessage.mes) return;
+
+    let query = lastMessage.mes;
+    if (query.length > 1000) query = query.substring(0, 1000);
+
+    const retrievedContext = await retrieveContext(query, chatId, isCurrentChatGroupChat());
+    if (!retrievedContext) return;
+
+    let position = 1;
+    let depth = 4;
+    if (extensionSettings.injectionPosition === 'before_main') {
+        position = 0; depth = 0;
+    } else if (extensionSettings.injectionPosition === 'after_main') {
+        position = 1; depth = 0;
+    } else if (extensionSettings.injectionPosition === 'after_messages') {
+        position = 1; depth = extensionSettings.injectAfterMessages || 3;
+    }
+
+    const formattedContext = '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]';
+
+    try {
+        context.setExtensionPrompt(MODULE_NAME, formattedContext, position, depth);
+        updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
+    } catch (e) {
+        console.error('[' + MODULE_NAME + '] setExtensionPrompt failed:', e);
+    }
+}
+
+async function injectContextBeforeGeneration(data) {
+    const now = Date.now();
+    if (now - lastInjectionTime < INJECTION_DEBOUNCE_MS) return;
+    if (!data || !data.chat || !Array.isArray(data.chat)) return;
+    if (data.chat.length <= 5) return;
+    if (!extensionSettings.enabled || !extensionSettings.injectContext) return;
+
+    const chatId = getCurrentChatId();
+    if (!chatId) return;
+
+    if (!currentChatIndexed) {
+        const isGroupChat = isCurrentChatGroupChat();
+        const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
+        const collectionName = prefix + chatId;
+        try {
+            const pointCount = await countPoints(collectionName);
+            if (pointCount > 0) currentChatIndexed = true;
+            else return;
+        } catch (e) { return; }
+    }
+
+    let context;
+    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+        context = SillyTavern.getContext();
+    } else if (typeof getContext === 'function') {
+        context = getContext();
+    }
+    if (!context || !context.chat || context.chat.length === 0) return;
+
+    let lastMessage = null;
+    for (let i = context.chat.length - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (msg.mes && !msg.is_system && msg.mes.trim().length > 0) {
+            lastMessage = msg;
+            break;
+        }
+    }
+    if (!lastMessage || !lastMessage.mes) return;
+
+    let query = lastMessage.mes;
+    if (query.length > 1000) query = query.substring(0, 1000);
+
+    const retrievedContext = await retrieveContext(query, chatId, isCurrentChatGroupChat());
+    if (!retrievedContext) return;
+
+    const ragMessage = {
+        role: 'system',
+        content: '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]'
+    };
+
+    let insertIndex = 0;
+    if (extensionSettings.injectionPosition === 'before_main') {
+        insertIndex = 0;
+    } else if (extensionSettings.injectionPosition === 'after_main') {
+        for (let i = 0; i < data.chat.length; i++) {
+            if (data.chat[i].role === 'user' || data.chat[i].role === 'assistant') {
+                insertIndex = i;
+                break;
+            }
+            insertIndex = i + 1;
+        }
+    } else if (extensionSettings.injectionPosition === 'after_messages') {
+        const depth = extensionSettings.injectAfterMessages || 3;
+        insertIndex = Math.max(0, data.chat.length - depth);
+    }
+
+    data.chat.splice(insertIndex, 0, ragMessage);
+    lastInjectionTime = Date.now();
+    updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
 }
 
 // ===========================
