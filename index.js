@@ -13,14 +13,21 @@ const MODULE_LOG_WHITELIST = [
     'Content found',
     'Initial check'
 ];
+
+// Allow detailed confirmations and hybrid search traces
 const MODULE_LOG_ALLOW_SUBSTR = [
     'Indexed message',
     'Deleted existing point',
     'Delete:',
     'Swipe:',
-    'HYBRID SEARCH',
-    'Hybrid search'
+    'HYBRID',          // any HYBRID SEARCH header/detail
+    'Run 1', 'Run 2',
+    'Final', 'Score',
+    'Collection:', 'Parameters:', 'Proper nouns',
+    'validated results', 'dense', 'filtered',
+    'Result', 'query filter', 'retrieved', 'retrieval', 'combined'
 ];
+
 const __origConsoleLog = console.log.bind(console);
 console.log = function(...args) {
     if (args.length && typeof args[0] === 'string' && args[0].startsWith('[' + MODULE_NAME + ']')) {
@@ -34,13 +41,10 @@ console.log = function(...args) {
     __origConsoleLog(...args);
 };
 
-// Extension settings with defaults
+// Extension settings with defaults (Cloud removed)
 const defaultSettings = {
     enabled: true,
-    qdrantMode: 'local',
     qdrantLocalUrl: 'http://localhost:6333',
-    qdrantCloudUrl: '',
-    qdrantApiKey: '',
     embeddingProvider: 'kobold',
     koboldUrl: 'http://localhost:11434', // updated default
     ollamaUrl: 'http://localhost:11434',
@@ -190,34 +194,20 @@ function extractProperNouns(text) {
             // Skip if word comes right after an opening quote within the sentence
             if (j > 0) {
                 const prevWord = words[j-1];
-                // If previous "word" ends with opening quote, this is dialogue start
                 if (prevWord && /["'"]$/.test(prevWord)) continue;
             }
             
-            // Skip contractions (it's, you're, don't, etc.) and possessives
-            // Check for both straight (') and curly (') apostrophes
-            if (word.indexOf("'") !== -1 || word.indexOf("'") !== -1 || word.indexOf("'") !== -1) continue;
-            
-            // Skip words that start with numbers (like "3D-printed", "2nd", "4K")
-            // These would get cleaned to "D-printed", "nd", "K" which aren't proper nouns
+            // Skip contractions and possessives
+            if (word.indexOf("'") !== -1) continue;
             if (/^\d/.test(word)) continue;
-            
-            // Skip words that contain numbers mixed with letters (like "MP3", "H2O")
             if (/\d/.test(word) && /[a-zA-Z]/.test(word)) continue;
             
-            // Clean the word - remove punctuation but keep the core
             const cleaned = word.replace(/^[^a-zA-Z]+|[^a-zA-Z]+$/g, '');
             
-            // Must start with capital, be at least 2 chars, and max 20 chars (avoid garbage)
             if (cleaned.length >= 2 && cleaned.length <= 20 && /^[A-Z]/.test(cleaned)) {
                 const lower = cleaned.toLowerCase();
-                
-                // Skip if it's a common word
                 if (commonWords.has(lower)) continue;
-                
-                // Skip if it's ALL CAPS (likely emphasis, not a proper noun)
                 if (cleaned === cleaned.toUpperCase() && cleaned.length > 2) continue;
-                
                 properNouns.add(lower);
             }
         }
@@ -273,18 +263,10 @@ function extractQueryFilterTerms(text) {
     const words = text.toLowerCase().split(/\s+/);
     
     for (const word of words) {
-        // Clean punctuation from start/end
         const cleaned = word.replace(/^[^a-z]+|[^a-z]+$/g, '');
-        
-        // Skip short words (less than 3 chars) - too common/meaningless
         if (cleaned.length < 3) continue;
-        
-        // Skip if longer than 20 chars (garbage)
         if (cleaned.length > 20) continue;
-        
-        // Skip stop words
         if (stopWords.has(cleaned)) continue;
-        
         terms.add(cleaned);
     }
     
@@ -292,24 +274,18 @@ function extractQueryFilterTerms(text) {
 }
 
 // ===========================
-// Qdrant Client Functions
+// Qdrant Client Functions (Cloud removed; only local)
 // ===========================
 
 async function qdrantRequest(endpoint, method, body) {
     if (method === undefined) method = 'GET';
     if (body === undefined) body = null;
     
-    const baseUrl = extensionSettings.qdrantMode === 'cloud' 
-        ? extensionSettings.qdrantCloudUrl 
-        : extensionSettings.qdrantLocalUrl;
+    const baseUrl = extensionSettings.qdrantLocalUrl;
     
     const headers = {
         'Content-Type': 'application/json'
     };
-    
-    if (extensionSettings.qdrantMode === 'cloud' && extensionSettings.qdrantApiKey) {
-        headers['api-key'] = extensionSettings.qdrantApiKey;
-    }
     
     const options = {
         method: method,
@@ -339,7 +315,6 @@ async function createCollection(collectionName, vectorSize) {
         
         if (exists) {
             console.log('[' + MODULE_NAME + '] Collection ' + collectionName + ' already exists');
-            // Still try to ensure payload index exists (idempotent)
             await createPayloadIndex(collectionName);
             return true;
         }
@@ -352,10 +327,7 @@ async function createCollection(collectionName, vectorSize) {
         });
         
         console.log('[' + MODULE_NAME + '] Created collection: ' + collectionName);
-        
-        // Create payload index for hybrid search
         await createPayloadIndex(collectionName);
-        
         return true;
     } catch (error) {
         console.error('[' + MODULE_NAME + '] Failed to create collection:', error);
@@ -363,10 +335,6 @@ async function createCollection(collectionName, vectorSize) {
     }
 }
 
-/**
- * Create payload index for proper_nouns field to enable fast filtering
- * This enables the hybrid search strategy
- */
 async function createPayloadIndex(collectionName) {
     try {
         await qdrantRequest('/collections/' + collectionName + '/index', 'PUT', {
@@ -376,7 +344,6 @@ async function createPayloadIndex(collectionName) {
         console.log('[' + MODULE_NAME + '] Created payload index for proper_nouns on ' + collectionName);
         return true;
     } catch (error) {
-        // Index might already exist, which is fine
         if (error.message && error.message.indexOf('already exists') !== -1) {
             console.log('[' + MODULE_NAME + '] Payload index already exists for ' + collectionName);
             return true;
@@ -398,9 +365,6 @@ async function upsertVectors(collectionName, points) {
     }
 }
 
-/**
- * Delete points by message_index for a given chat and collection
- */
 async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
     try {
         await qdrantRequest('/collections/' + collectionName + '/points/delete', 'POST', {
@@ -420,17 +384,11 @@ async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
 
 /**
  * Hybrid search: combines filtered (proper noun) search with dense search
- * Strategy:
- *   1. Run 1 (Narrow): Search with proper noun filter
- *   2. Run 2 (Broad): If Run 1 returns < retrievalCount results, run pure dense search
- *   3. Combine and deduplicate results, sorted by score
  */
 async function searchVectors(collectionName, vector, limit, scoreThreshold, properNouns) {
-    // Anchor to settings if not provided
     if (limit === undefined || limit === null) limit = extensionSettings.retrievalCount || 5;
     if (scoreThreshold === undefined) scoreThreshold = extensionSettings.similarityThreshold || 0.7;
     if (properNouns === undefined) properNouns = [];
-    // Require this many filtered before skipping dense
     const requiredFiltered = extensionSettings.retrievalCount || limit;
     
     try {
@@ -443,11 +401,8 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
         let filteredResults = [];
         let denseResults = [];
         
-        // ===== RUN 1: Filtered Search (if we have proper nouns) =====
         if (properNouns.length > 0) {
             console.log('[' + MODULE_NAME + '] Run 1: Filtered search with ' + properNouns.length + ' proper nouns...');
-            
-            // Build filter: match ANY of the proper nouns
             const filter = {
                 should: properNouns.map(function(noun) {
                     return {
@@ -460,7 +415,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
             try {
                 const filteredResult = await qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
                     vector: vector,
-                    limit: limit * 2,  // Request more since we'll filter some out
+                    limit: limit * 2,
                     score_threshold: scoreThreshold,
                     with_payload: true,
                     filter: filter
@@ -469,7 +424,6 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
                 const rawResults = filteredResult.result || [];
                 console.log('[' + MODULE_NAME + '] Run 1 raw results: ' + rawResults.length);
                 
-                // IMPORTANT: Validate that each result actually has matching proper_nouns
                 filteredResults = rawResults.filter(function(r) {
                     const resultNouns = r.payload.proper_nouns || [];
                     const hasMatch = resultNouns.some(function(noun) {
@@ -485,7 +439,6 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
                 
                 if (filteredResults.length > 0) {
                     console.log('[' + MODULE_NAME + '] Filtered top score: ' + filteredResults[0].score.toFixed(3));
-                    // Log which nouns matched
                     filteredResults.forEach(function(r, idx) {
                         const matchedNouns = (r.payload.proper_nouns || []).filter(function(n) {
                             return properNouns.indexOf(n) !== -1;
@@ -498,7 +451,6 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
             }
         }
         
-        // ===== RUN 2: Dense Search (if filtered returned fewer than requiredFiltered) =====
         if (filteredResults.length < requiredFiltered) {
             console.log('[' + MODULE_NAME + '] Run 2: Dense search (filtered returned ' + filteredResults.length + ' < ' + requiredFiltered + ')...');
             
@@ -519,20 +471,17 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
             console.log('[' + MODULE_NAME + '] Skipping dense: filtered returned sufficient results (' + filteredResults.length + ' >= ' + requiredFiltered + ')');
         }
         
-        // ===== COMBINE AND DEDUPLICATE =====
         const combined = [];
         const seenIds = new Set();
         
-        // Add filtered results first (they matched on proper nouns = more relevant)
         filteredResults.forEach(function(r) {
             if (!seenIds.has(r.id)) {
-                r._source = 'filtered'; // Mark source for debugging
+                r._source = 'filtered';
                 combined.push(r);
                 seenIds.add(r.id);
             }
         });
         
-        // Add dense results that weren't in filtered
         denseResults.forEach(function(r) {
             if (!seenIds.has(r.id)) {
                 r._source = 'dense';
@@ -541,10 +490,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
             }
         });
         
-        // Sort by score descending
         combined.sort(function(a, b) { return b.score - a.score; });
-        
-        // Limit to requested count
         const finalResults = combined.slice(0, limit);
         
         console.log('[' + MODULE_NAME + '] ===== HYBRID SEARCH COMPLETE =====');
@@ -582,17 +528,12 @@ async function countPoints(collectionName) {
     }
 }
 
-/**
- * Delete a collection from Qdrant
- * Used for force re-indexing
- */
 async function deleteCollection(collectionName) {
     try {
         await qdrantRequest('/collections/' + collectionName, 'DELETE');
         console.log('[' + MODULE_NAME + '] Deleted collection: ' + collectionName);
         return true;
     } catch (error) {
-        // Collection might not exist, which is fine
         if (error.message && error.message.indexOf('404') !== -1) {
             console.log('[' + MODULE_NAME + '] Collection did not exist: ' + collectionName);
             return true;
@@ -602,10 +543,6 @@ async function deleteCollection(collectionName) {
     }
 }
 
-/**
- * Force re-index the current chat
- * Deletes existing collection and rebuilds from scratch with proper_nouns for hybrid search
- */
 async function forceReindexCurrentChat() {
     const chatId = getCurrentChatId();
     if (!chatId) {
@@ -619,15 +556,12 @@ async function forceReindexCurrentChat() {
     console.log('[' + MODULE_NAME + '] Force re-indexing: ' + collectionName);
     updateUI('status', 'Deleting old collection...');
     
-    // Delete existing collection
     await deleteCollection(collectionName);
     
-    // Reset tracking state
     currentChatIndexed = false;
     lastMessageCount = 0;
     indexedMessageIds.clear();
     
-    // Get current chat and re-index
     let context;
     if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
         context = SillyTavern.getContext();
@@ -778,30 +712,22 @@ function buildEmbeddingText(message, tracker) {
 function extractPayload(message, messageIndex, chatIdHash) {
     const tracker = message.tracker || {};
     
-    // Extract characters present from the message
     let charactersPresent = [];
     if (message.present && Array.isArray(message.present)) {
-        // present is an array of avatar filenames like ["character1.png", "character2.png"]
         charactersPresent = message.present.map(function(avatar) {
-            // Remove .png extension to get character name
             return avatar.replace(/\.png$/, '');
         });
     } else if (tracker.CharactersPresent && Array.isArray(tracker.CharactersPresent)) {
         charactersPresent = tracker.CharactersPresent;
     }
     
-    // Extract proper nouns for hybrid search filtering
-    // ONLY from full_message and summary - NOT from character names or other metadata
-    // This ensures we match on "messages that MENTION X" not "messages BY X"
     const messageProperNouns = extractProperNouns(message.mes || '');
     
-    // Also extract from summary if it exists
     const summary = (message.extra && message.extra.qvink_memory && message.extra.qvink_memory.memory) 
         ? message.extra.qvink_memory.memory 
         : '';
     const summaryProperNouns = summary ? extractProperNouns(summary) : [];
     
-    // Combine message and summary proper nouns (NOT character names)
     const contentNouns = new Set(messageProperNouns.concat(summaryProperNouns));
     
     return {
@@ -816,7 +742,7 @@ function extractPayload(message, messageIndex, chatIdHash) {
         topic: (tracker.Topics && tracker.Topics.PrimaryTopic) ? tracker.Topics.PrimaryTopic : '',
         emotional_tone: (tracker.Topics && tracker.Topics.EmotionalTone) ? tracker.Topics.EmotionalTone : '',
         location: (tracker.Characters && tracker.Characters[message.name] && tracker.Characters[message.name].Location) ? tracker.Characters[message.name].Location : '',
-        proper_nouns: Array.from(contentNouns) // For hybrid search filtering - content only!
+        proper_nouns: Array.from(contentNouns)
     };
 }
 
@@ -836,7 +762,6 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
     
     try {
         const parsed = parseJSONL(jsonlContent);
-        const chatMetadata = parsed.chatMetadata;
         const messages = parsed.messages;
         
         if (messages.length === 0) {
@@ -954,21 +879,18 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
         const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
         const collectionName = prefix + chatIdHash;
         
-        // Extract filter terms from query (more lenient than proper noun extraction)
-        // This will match words regardless of capitalization in the query
         const queryFilterTerms = extractQueryFilterTerms(query);
         console.log('[' + MODULE_NAME + '] Query filter terms: ' + 
             (queryFilterTerms.length > 0 ? queryFilterTerms.join(', ') : '(none - pure dense search)'));
         
         const queryEmbedding = await generateEmbedding(query);
         
-        // Use hybrid search with filter terms
         const results = await searchVectors(
             collectionName,
             queryEmbedding,
             extensionSettings.retrievalCount,
             extensionSettings.similarityThreshold,
-            queryFilterTerms  // Pass filter terms for filtering
+            queryFilterTerms
         );
         
         if (results.length === 0) {
@@ -1088,7 +1010,6 @@ async function onChatLoaded() {
             console.log('[' + MODULE_NAME + '] Initial message count: ' + lastMessageCount);
         }
         
-        // Check if collection already exists in Qdrant
         if (chatId) {
             const isGroupChat = isCurrentChatGroupChat();
             const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
@@ -1151,9 +1072,6 @@ async function onMessageSent(messageData) {
         await indexSingleMessage(messageData, chatId, messageIndex, isGroupChat);
     }
     
-    // Note: RAG context retrieval happens during chat_completion_prompt_ready event
-    // Query is based on context.chat (actual messages), not data.chat (API format)
-    
     console.log('[' + MODULE_NAME + '] ===== MESSAGE SENT HANDLER COMPLETE =====');
 }
 
@@ -1171,7 +1089,6 @@ async function onMessageReceived(messageData) {
     
     const isGroupChat = isCurrentChatGroupChat();
     
-    // Index the newly received message
     if (currentChatIndexed && typeof SillyTavern !== 'undefined') {
         try {
             const context = SillyTavern.getContext();
@@ -1193,9 +1110,6 @@ async function onMessageReceived(messageData) {
     console.log('[' + MODULE_NAME + '] ===== MESSAGE RECEIVED HANDLER COMPLETE =====');
 }
 
-/**
- * Handle a message being swiped (re-generated). Re-index the last message.
- */
 async function onMessageSwiped(data) {
     console.log('[' + MODULE_NAME + '] ===== MESSAGE SWIPED EVENT FIRED =====');
 
@@ -1207,7 +1121,6 @@ async function onMessageSwiped(data) {
     const isGroupChat = isCurrentChatGroupChat();
     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
 
-    // Ensure index exists
     if (!currentChatIndexed) {
         try {
             const pointCount = await countPoints(collectionName);
@@ -1223,7 +1136,6 @@ async function onMessageSwiped(data) {
         }
     }
 
-    // Re-index the last message (the swiped one)
     let context;
     if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
         context = SillyTavern.getContext();
@@ -1241,9 +1153,6 @@ async function onMessageSwiped(data) {
     console.log('[' + MODULE_NAME + '] Swipe: re-indexed message ' + messageIndex);
 }
 
-/**
- * Handle a message being deleted. Remove its point by message_index.
- */
 async function onMessageDeleted(data) {
     console.log('[' + MODULE_NAME + '] ===== MESSAGE DELETED EVENT FIRED =====');
 
@@ -1255,7 +1164,6 @@ async function onMessageDeleted(data) {
     const isGroupChat = isCurrentChatGroupChat();
     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
 
-    // Ensure index exists
     if (!currentChatIndexed) {
         try {
             const pointCount = await countPoints(collectionName);
@@ -1271,7 +1179,6 @@ async function onMessageDeleted(data) {
         }
     }
 
-    // data is the message index (per console logs)
     const messageIndex = typeof data === 'number' ? data : null;
     if (messageIndex === null) {
         console.log('[' + MODULE_NAME + '] Delete: no index provided, skipping');
@@ -1281,392 +1188,6 @@ async function onMessageDeleted(data) {
     await deleteMessageByIndex(collectionName, chatId, messageIndex);
     indexedMessageIds.delete(messageIndex);
     console.log('[' + MODULE_NAME + '] Delete: removed message_index=' + messageIndex);
-}
-
-async function injectContextWithSetExtensionPrompt() {
-    if (!extensionSettings.enabled || !extensionSettings.injectContext) {
-        return;
-    }
-    
-    const chatId = getCurrentChatId();
-    if (!chatId) {
-        return;
-    }
-    
-    // Check if chat is indexed
-    if (!currentChatIndexed) {
-        const isGroupChat = isCurrentChatGroupChat();
-        const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
-        const collectionName = prefix + chatId;
-        try {
-            const pointCount = await countPoints(collectionName);
-            if (pointCount > 0) {
-                currentChatIndexed = true;
-                console.log('[' + MODULE_NAME + '] Found indexed collection with ' + pointCount + ' points');
-            } else {
-                console.log('[' + MODULE_NAME + '] Chat not indexed, skipping injection');
-                return;
-            }
-        } catch (e) {
-            console.log('[' + MODULE_NAME + '] Could not verify collection, skipping injection');
-            return;
-        }
-    }
-    
-    const isGroupChat = isCurrentChatGroupChat();
-    
-    // Get context for both the chat data AND setExtensionPrompt
-    let context;
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-        context = SillyTavern.getContext();
-    } else if (typeof getContext === 'function') {
-        context = getContext();
-    }
-    
-    if (!context || !context.chat || context.chat.length === 0) {
-        console.log('[' + MODULE_NAME + '] No chat context available');
-        return;
-    }
-    
-    if (!context.setExtensionPrompt || typeof context.setExtensionPrompt !== 'function') {
-        console.log('[' + MODULE_NAME + '] setExtensionPrompt not available');
-        return;
-    }
-    
-    // Find the last actual message (user or character) - skip system messages
-    let lastMessage = null;
-    for (let i = context.chat.length - 1; i >= 0; i--) {
-        const msg = context.chat[i];
-        if (msg.mes && !msg.is_system && msg.mes.trim().length > 0) {
-            lastMessage = msg;
-            break;
-        }
-    }
-    
-    if (!lastMessage || !lastMessage.mes) {
-        console.log('[' + MODULE_NAME + '] No valid last message found');
-        return;
-    }
-    
-    let query = lastMessage.mes;
-    if (query.length > 1000) {
-        query = query.substring(0, 1000);
-    }
-    
-    console.log('[' + MODULE_NAME + '] Query from ' + (lastMessage.is_user ? 'user' : 'character') + ': "' + query.substring(0, 80) + '..."');
-    
-    // Retrieve context
-    console.log('[' + MODULE_NAME + '] Retrieving RAG context...');
-    const retrievedContext = await retrieveContext(query, chatId, isGroupChat);
-    
-    if (!retrievedContext) {
-        console.log('[' + MODULE_NAME + '] No relevant context found');
-        return;
-    }
-    
-    console.log('[' + MODULE_NAME + '] Retrieved context (' + retrievedContext.length + ' chars)');
-    
-    // Determine position and depth based on settings
-    // Position: 0 = before main prompt, 1 = after main prompt
-    // Depth: how many messages from the end to insert (0 = at system prompt level)
-    let position = 1; // after main prompt
-    let depth = 4; // default depth
-    
-    if (extensionSettings.injectionPosition === 'before_main') {
-        position = 0;
-        depth = 0;
-    } else if (extensionSettings.injectionPosition === 'after_main') {
-        position = 1;
-        depth = 0;
-    } else if (extensionSettings.injectionPosition === 'after_messages') {
-        position = 1;
-        depth = extensionSettings.injectAfterMessages || 3;
-    }
-    
-    // Format the context with a wrapper
-    const formattedContext = '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]';
-    
-    // Use setExtensionPrompt - this is the proper SillyTavern API!
-    try {
-        context.setExtensionPrompt(MODULE_NAME, formattedContext, position, depth);
-        console.log('[' + MODULE_NAME + '] Injected via setExtensionPrompt (position=' + position + ', depth=' + depth + ')');
-        console.log('[' + MODULE_NAME + '] ===== INJECTION SUCCESSFUL =====');
-        updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
-    } catch (e) {
-        console.error('[' + MODULE_NAME + '] setExtensionPrompt failed:', e);
-    }
-}
-
-async function injectContextBeforeGeneration(data) {
-    // Debounce - prevent multiple injections in quick succession
-    const now = Date.now();
-    if (now - lastInjectionTime < INJECTION_DEBOUNCE_MS) {
-        console.log('[' + MODULE_NAME + '] Skipping injection - debounce');
-        return;
-    }
-    
-    // Skip if no data or chat
-    if (!data || !data.chat || !Array.isArray(data.chat)) {
-        return;
-    }
-    
-    // Skip Tracker and other extension calls - they have small chat arrays
-    if (data.chat.length <= 5) {
-        return;
-    }
-    
-    if (!extensionSettings.enabled || !extensionSettings.injectContext) {
-        return;
-    }
-    
-    const chatId = getCurrentChatId();
-    if (!chatId) {
-        return;
-    }
-    
-    // Check if chat is indexed
-    if (!currentChatIndexed) {
-        const isGroupChat = isCurrentChatGroupChat();
-        const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
-        const collectionName = prefix + chatId;
-        try {
-            const pointCount = await countPoints(collectionName);
-            if (pointCount > 0) {
-                currentChatIndexed = true;
-                console.log('[' + MODULE_NAME + '] Found indexed collection with ' + pointCount + ' points');
-            } else {
-                console.log('[' + MODULE_NAME + '] Chat not indexed, skipping injection');
-                return;
-            }
-        } catch (e) {
-            console.log('[' + MODULE_NAME + '] Could not verify collection, skipping injection');
-            return;
-        }
-    }
-    
-    const isGroupChat = isCurrentChatGroupChat();
-    
-    // Get query from SillyTavern's context.chat (actual messages with .mes format)
-    // This gives us the REAL last message, not prompt instructions
-    let context;
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-        context = SillyTavern.getContext();
-    } else if (typeof getContext === 'function') {
-        context = getContext();
-    }
-    
-    if (!context || !context.chat || context.chat.length === 0) {
-        console.log('[' + MODULE_NAME + '] No chat context available');
-        return;
-    }
-    
-    // Find the last actual message (user or character) from context.chat - skip system messages
-    let lastMessage = null;
-    for (let i = context.chat.length - 1; i >= 0; i--) {
-        const msg = context.chat[i];
-        if (msg.mes && !msg.is_system && msg.mes.trim().length > 0) {
-            lastMessage = msg;
-            break;
-        }
-    }
-    
-    if (!lastMessage || !lastMessage.mes) {
-        console.log('[' + MODULE_NAME + '] No valid last message found');
-        return;
-    }
-    
-    let query = lastMessage.mes;
-    if (query.length > 1000) {
-        query = query.substring(0, 1000);
-    }
-    
-    console.log('[' + MODULE_NAME + '] Query from ' + (lastMessage.is_user ? 'user' : 'character') + ': "' + query.substring(0, 80) + '..."');
-    
-    // Retrieve context based on the message
-    console.log('[' + MODULE_NAME + '] Retrieving RAG context...');
-    const retrievedContext = await retrieveContext(query, chatId, isGroupChat);
-    
-    if (!retrievedContext) {
-        console.log('[' + MODULE_NAME + '] No relevant context found');
-        return;
-    }
-    
-    console.log('[' + MODULE_NAME + '] Retrieved context (' + retrievedContext.length + ' chars)');
-    
-    // Inject into data.chat (API format copy) - NOT context.chat!
-    // data.chat is temporary for this generation only, won't affect Tracker
-    const ragMessage = {
-        role: 'system',
-        content: '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]'
-    };
-    
-    // Find insertion point based on settings
-    let insertIndex = 0;
-    
-    if (extensionSettings.injectionPosition === 'before_main') {
-        // Insert at the beginning
-        insertIndex = 0;
-    } else if (extensionSettings.injectionPosition === 'after_main') {
-        // Insert after system messages but before conversation
-        for (let i = 0; i < data.chat.length; i++) {
-            if (data.chat[i].role === 'user' || data.chat[i].role === 'assistant') {
-                insertIndex = i;
-                break;
-            }
-            insertIndex = i + 1;
-        }
-    } else if (extensionSettings.injectionPosition === 'after_messages') {
-        // Insert at depth from end
-        const depth = extensionSettings.injectAfterMessages || 3;
-        insertIndex = Math.max(0, data.chat.length - depth);
-    }
-    
-    data.chat.splice(insertIndex, 0, ragMessage);
-    
-    // Update debounce timestamp
-    lastInjectionTime = Date.now();
-    
-    console.log('[' + MODULE_NAME + '] Injected into data.chat at index ' + insertIndex + ' (total: ' + data.chat.length + ')');
-    console.log('[' + MODULE_NAME + '] ===== INJECTION SUCCESSFUL =====');
-    updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
-}
-
-async function pollForNewMessages() {
-    if (!extensionSettings.enabled || !extensionSettings.autoIndex) {
-        return;
-    }
-    
-    if (isIndexing) {
-        return;
-    }
-    
-    try {
-        let context;
-        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-            context = SillyTavern.getContext();
-        } else if (typeof getContext === 'function') {
-            context = getContext();
-        }
-        
-        if (!context || !context.chat) return;
-        
-        const chatId = getCurrentChatId();
-        if (!chatId) return;
-        
-        if (lastChatId !== chatId) {
-            console.log('[' + MODULE_NAME + '] Chat changed to: ' + chatId);
-            lastChatId = chatId;
-            currentChatIndexed = false;
-            lastMessageCount = 0;
-            indexedMessageIds.clear();
-            
-            const isGroupChat = isCurrentChatGroupChat();
-            const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
-            const collectionName = prefix + chatId;
-            const existingPoints = await countPoints(collectionName);
-            
-            if (existingPoints > 0) {
-                console.log('[' + MODULE_NAME + '] Chat has ' + existingPoints + ' points - marking as indexed');
-                currentChatIndexed = true;
-                lastMessageCount = context.chat.length;
-                for (let i = 0; i < lastMessageCount; i++) {
-                    indexedMessageIds.add(i);
-                }
-                updateUI('status', 'Chat already indexed (' + existingPoints + ' messages)');
-            }
-        }
-        
-        const currentMessageCount = context.chat.length;
-        
-        if (currentMessageCount > lastMessageCount) {
-            console.log('[' + MODULE_NAME + '] New message: count ' + lastMessageCount + ' -> ' + currentMessageCount);
-            
-            const isGroupChat = isCurrentChatGroupChat();
-            
-            if (!currentChatIndexed) {
-                console.log('[' + MODULE_NAME + '] Auto-indexing entire chat (' + currentMessageCount + ' messages)');
-                updateUI('status', 'Auto-indexing chat...');
-                const jsonl = convertChatToJSONL(context);
-                await indexChat(jsonl, chatId, isGroupChat);
-                currentChatIndexed = true;
-                
-                for (let i = 0; i < currentMessageCount; i++) {
-                    indexedMessageIds.add(i);
-                }
-            } else {
-                for (let i = lastMessageCount; i < currentMessageCount; i++) {
-                    if (!indexedMessageIds.has(i)) {
-                        const message = context.chat[i];
-                        console.log('[' + MODULE_NAME + '] Indexing new message ' + i + ': ' + message.name);
-                        await indexSingleMessage(message, chatId, i, isGroupChat);
-                        indexedMessageIds.add(i);
-                    }
-                }
-            }
-            
-            lastMessageCount = currentMessageCount;
-            updateUI('status', 'Ready - ' + currentMessageCount + ' messages indexed');
-            
-            // Only inject from polling if events aren't registered
-            // (events handle injection via GENERATE_AFTER_COMMANDS etc.)
-            if (extensionSettings.injectContext && !eventsRegistered) {
-                console.log('[' + MODULE_NAME + '] Polling: injecting context (no events available)');
-                await injectContextBeforeGeneration();
-            }
-        }
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Polling error:', error);
-    }
-}
-
-async function startPolling() {
-    if (pollingInterval) {
-        clearInterval(pollingInterval);
-    }
-    
-    console.log('[' + MODULE_NAME + '] Starting message polling (every 5 seconds)');
-    pollingInterval = setInterval(pollForNewMessages, 5000);
-    
-    await pollForNewMessages();
-}
-
-function convertChatToJSONL(context) {
-    const lines = [];
-    
-    if (context.chatMetadata) {
-        lines.push(JSON.stringify({ chat_metadata: context.chatMetadata }));
-    }
-    
-    if (context.chat) {
-        context.chat.forEach(function(message) {
-            lines.push(JSON.stringify(message));
-        });
-    }
-    
-    return lines.join('\n');
-}
-
-// NEW: Convert plain text to JSONL (paragraphs → messages)
-function convertTextToJSONL(text) {
-    // Split on blank lines; fallback to single lines if no double newlines
-    let chunks = text.split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
-    if (chunks.length === 0) {
-        chunks = text.split('\n').map(s => s.trim()).filter(Boolean);
-    }
-    const lines = [];
-    chunks.forEach((chunk, idx) => {
-        lines.push(JSON.stringify({
-            name: 'ImportedText',
-            is_user: true,
-            mes: chunk,
-            send_date: new Date().toISOString(),
-            extra: {},
-            tracker: {},
-            present: [],
-            index: idx
-        }));
-    });
-    return lines.join('\n');
 }
 
 // ===========================
@@ -1718,26 +1239,8 @@ function createSettingsUI() {
                     '<div class="ragfordummies-section">' +
                         '<h4>Qdrant Configuration</h4>' +
                         '<label>' +
-                            '<span>Mode:</span>' +
-                            '<select id="ragfordummies_qdrant_mode">' +
-                                '<option value="local" ' + (extensionSettings.qdrantMode === 'local' ? 'selected' : '') + '>Local (Docker)</option>' +
-                                '<option value="cloud" ' + (extensionSettings.qdrantMode === 'cloud' ? 'selected' : '') + '>Cloud</option>' +
-                            '</select>' +
-                        '</label>' +
-                        
-                        '<label>' +
                             '<span>Local URL:</span>' +
                             '<input type="text" id="ragfordummies_qdrant_local_url" value="' + extensionSettings.qdrantLocalUrl + '" placeholder="http://localhost:6333" />' +
-                        '</label>' +
-                        
-                        '<label>' +
-                            '<span>Cloud URL:</span>' +
-                            '<input type="text" id="ragfordummies_qdrant_cloud_url" value="' + extensionSettings.qdrantCloudUrl + '" placeholder="https://your-cluster.qdrant.io" />' +
-                        '</label>' +
-                        
-                        '<label>' +
-                            '<span>Cloud API Key:</span>' +
-                            '<input type="password" id="ragfordummies_qdrant_api_key" value="' + extensionSettings.qdrantApiKey + '" placeholder="Your Qdrant API key" />' +
                         '</label>' +
                     '</div>' +
                     
@@ -1859,7 +1362,7 @@ function createSettingsUI() {
 
 function attachEventListeners() {
     const settingIds = [
-        'enabled', 'qdrant_mode', 'qdrant_local_url', 'qdrant_cloud_url', 'qdrant_api_key',
+        'enabled', 'qdrant_local_url',
         'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
         'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold',
         'auto_index', 'inject_context', 'injection_position', 'inject_after_messages'
@@ -1905,7 +1408,6 @@ function attachEventListeners() {
         });
     }
     
-    // Injection position toggle
     const injectionPositionSelect = document.getElementById('ragfordummies_injection_position');
     if (injectionPositionSelect) {
         injectionPositionSelect.addEventListener('change', function() {
@@ -1948,30 +1450,17 @@ function attachEventListeners() {
     }
     
     const testRetrievalBtn = document.getElementById('ragfordummies_test_retrieval');
-    console.log('[' + MODULE_NAME + '] Test retrieval button found:', testRetrievalBtn !== null);
-    
     if (testRetrievalBtn) {
         testRetrievalBtn.addEventListener('click', async function() {
-            console.log('[' + MODULE_NAME + '] ========================================');
-            console.log('[' + MODULE_NAME + '] TEST CONTEXT RETRIEVAL STARTED');
-            console.log('[' + MODULE_NAME + '] ========================================');
-            
             updateUI('status', 'Testing context retrieval...');
             try {
                 const chatId = getCurrentChatId();
-                console.log('[' + MODULE_NAME + '] Chat ID:', chatId);
-                
                 if (!chatId) {
                     updateUI('status', '✗ No active chat found');
-                    console.log('[' + MODULE_NAME + '] FAILED: No chat ID');
                     return;
                 }
-                
-                console.log('[' + MODULE_NAME + '] Chat indexed:', currentChatIndexed);
-                
                 if (!currentChatIndexed) {
                     updateUI('status', '✗ Chat not indexed yet. Click "Index Current Chat" first.');
-                    console.log('[' + MODULE_NAME + '] FAILED: Chat not indexed');
                     return;
                 }
                 
@@ -1979,228 +1468,54 @@ function attachEventListeners() {
                 const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
                 const collectionName = prefix + chatId;
                 
-                console.log('[' + MODULE_NAME + '] Is group chat:', isGroupChat);
-                console.log('[' + MODULE_NAME + '] Collection name:', collectionName);
-                
-                // Check collection exists
                 const pointCount = await countPoints(collectionName);
-                console.log('[' + MODULE_NAME + '] Collection has ' + pointCount + ' indexed points');
-                
                 if (pointCount === 0) {
                     updateUI('status', '✗ Collection is empty! Re-index the chat.');
-                    console.log('[' + MODULE_NAME + '] FAILED: Collection empty');
                     return;
                 }
                 
                 const context = SillyTavern.getContext();
-                
-                // Get ONLY actual chat messages (same logic as injection)
                 const actualMessages = context.chat.filter(function(m) {
                     if (!m.mes) return false;
                     if (m.is_system) return false;
                     if (m.mes.trim().length === 0) return false;
                     return true;
                 });
-                
-                // Get ONLY the last message
                 const lastMessage = actualMessages[actualMessages.length - 1];
-                
                 if (!lastMessage) {
                     updateUI('status', '✗ No valid message found');
                     return;
                 }
-                
                 let query = lastMessage.mes;
-                
-                console.log('[' + MODULE_NAME + '] Query from last message (' + (lastMessage.is_user ? 'USER' : 'CHAR') + '): "' + query.substring(0, 100) + '..."');
-                
-                if (query.length > 1000) {
-                    query = query.substring(0, 1000);
-                }
-                
-                console.log('[' + MODULE_NAME + '] Query text length:', query.length);
-                console.log('[' + MODULE_NAME + '] ---');
-                console.log('[' + MODULE_NAME + '] Sending search request to Qdrant...');
+                if (query.length > 1000) query = query.substring(0, 1000);
                 
                 const retrievedContext = await retrieveContext(query, chatId, isGroupChat);
-                
-                console.log('[' + MODULE_NAME + '] ---');
-                
                 if (retrievedContext) {
                     updateUI('status', '✓ Retrieved ' + retrievedContext.length + ' chars of context');
-                    console.log('[' + MODULE_NAME + '] SUCCESS - Retrieved context:');
-                    console.log('[' + MODULE_NAME + '] ========== FULL RETRIEVED CONTEXT ==========');
                     console.log(retrievedContext);
-                    console.log('[' + MODULE_NAME + '] ============================================');
                 } else {
-                    updateUI('status', '✗ No context found - try lowering similarity threshold to 0.5 or 0.4');
-                    console.log('[' + MODULE_NAME + '] No context retrieved - similarity threshold may be too high');
-                    console.log('[' + MODULE_NAME + '] Current threshold: ' + extensionSettings.similarityThreshold);
-                    console.log('[' + MODULE_NAME + '] Try lowering it in settings');
+                    updateUI('status', '✗ No context found - try lowering similarity threshold');
                 }
-                
-                console.log('[' + MODULE_NAME + '] ========================================');
-                console.log('[' + MODULE_NAME + '] TEST COMPLETE');
-                console.log('[' + MODULE_NAME + '] ========================================');
             } catch (error) {
                 updateUI('status', '✗ Retrieval failed: ' + error.message);
                 console.error('[' + MODULE_NAME + '] TEST FAILED -', error);
-                console.error('[' + MODULE_NAME + '] Error stack:', error.stack);
             }
         });
-        console.log('[' + MODULE_NAME + '] Test retrieval button handler attached');
-    } else {
-        console.error('[' + MODULE_NAME + '] Test retrieval button NOT FOUND in DOM!');
     }
     
-    // Test context injection
     const testInjectionBtn = document.getElementById('ragfordummies_test_injection');
     if (testInjectionBtn) {
         testInjectionBtn.addEventListener('click', async function() {
-            console.log('[' + MODULE_NAME + '] ========================================');
-            console.log('[' + MODULE_NAME + '] TEST CONTEXT INJECTION');
-            console.log('[' + MODULE_NAME + '] ========================================');
-            
             updateUI('status', 'Testing context injection...');
-            
             if (!currentChatIndexed) {
                 updateUI('status', '✗ Chat not indexed. Index first.');
-                console.log('[' + MODULE_NAME + '] FAILED: Chat not indexed');
                 return;
             }
-            
-            console.log('[' + MODULE_NAME + '] Searching for SillyTavern extension API...');
-            console.log('[' + MODULE_NAME + '] typeof setExtensionPrompt:', typeof setExtensionPrompt);
-            console.log('[' + MODULE_NAME + '] typeof window.setExtensionPrompt:', typeof window.setExtensionPrompt);
-            console.log('[' + MODULE_NAME + '] typeof extension_prompts:', typeof extension_prompts);
-            console.log('[' + MODULE_NAME + '] typeof window.extension_prompts:', typeof window.extension_prompts);
-            console.log('[' + MODULE_NAME + '] typeof eventSource:', typeof eventSource);
-            console.log('[' + MODULE_NAME + '] typeof SillyTavern:', typeof SillyTavern);
-            
-            if (typeof SillyTavern !== 'undefined') {
-                console.log('[' + MODULE_NAME + '] SillyTavern EXISTS! Exploring...');
-                console.log('[' + MODULE_NAME + '] SillyTavern keys:', Object.keys(SillyTavern));
-                
-                // Explore libs
-                if (SillyTavern.libs) {
-                    console.log('[' + MODULE_NAME + '] SillyTavern.libs exists!');
-                    console.log('[' + MODULE_NAME + '] libs keys:', Object.keys(SillyTavern.libs));
-                    console.log('[' + MODULE_NAME + '] libs content:', SillyTavern.libs);
-                }
-                
-                // Check context
-                if (SillyTavern.getContext) {
-                    const ctx = SillyTavern.getContext();
-                    console.log('[' + MODULE_NAME + '] Context keys:', Object.keys(ctx));
-                    
-                    // Look for prompt-related properties
-                    const promptProps = Object.keys(ctx).filter(function(k) {
-                        return k.toLowerCase().indexOf('prompt') !== -1 ||
-                               k.toLowerCase().indexOf('extension') !== -1;
-                    });
-                    console.log('[' + MODULE_NAME + '] Prompt-related context properties:', promptProps);
-                    
-                    // Check if setExtensionPrompt is on context
-                if (ctx.setExtensionPrompt) {
-                    console.log('[' + MODULE_NAME + '] context.setExtensionPrompt EXISTS');
-                    console.log('[' + MODULE_NAME + '] This is the correct injection method!');
-                    console.log('[' + MODULE_NAME + '] Triggering test injection...');
-                    await injectContextBeforeGeneration();
-                } else {
-                    console.log('[' + MODULE_NAME + '] context.setExtensionPrompt NOT FOUND');
-                }
-                
-                // Check if there's an extension_prompts array in context
-                if (ctx.extensionPrompts) {
-                    console.log('[' + MODULE_NAME + '] ctx.extensionPrompts exists:', ctx.extensionPrompts);
-                }
-            }
-            
-            if (SillyTavern.extensions) {
-                console.log('[' + MODULE_NAME + '] SillyTavern.extensions:', SillyTavern.extensions);
-                console.log('[' + MODULE_NAME + '] extensions keys:', Object.keys(SillyTavern.extensions));
-            }
-            
-            if (SillyTavern.setExtensionPrompt) {
-                console.log('[' + MODULE_NAME + '] SillyTavern.setExtensionPrompt EXISTS');
-            }
-                
-                // Search for prompt-related properties
-                const stKeys = Object.keys(SillyTavern);
-                const promptKeys = stKeys.filter(function(k) {
-                    return k.toLowerCase().indexOf('prompt') !== -1 ||
-                           k.toLowerCase().indexOf('inject') !== -1 ||
-                           k.toLowerCase().indexOf('extension') !== -1;
-                });
-                console.log('[' + MODULE_NAME + '] Prompt-related SillyTavern properties:', promptKeys);
-                
-                // Show all SillyTavern functions
-                const stFunctions = stKeys.filter(function(k) {
-                    return typeof SillyTavern[k] === 'function';
-                });
-                console.log('[' + MODULE_NAME + '] SillyTavern functions:', stFunctions);
-            }
-            
-            if (typeof extension_prompts !== 'undefined') {
-                console.log('[' + MODULE_NAME + '] extension_prompts object:', extension_prompts);
-            } else {
-                console.log('[' + MODULE_NAME + '] extension_prompts does NOT exist');
-            }
-            
-            // Search for any prompt-related functions
-            const allGlobals = Object.keys(window);
-            const promptFunctions = allGlobals.filter(function(k) {
-                const val = window[k];
-                return typeof val === 'function' && (
-                    k.toLowerCase().indexOf('prompt') !== -1 ||
-                    k.toLowerCase().indexOf('inject') !== -1 ||
-                    k.toLowerCase().indexOf('extension') !== -1
-                );
-            });
-            console.log('[' + MODULE_NAME + '] Prompt-related functions:', promptFunctions);
-            
-            // Search for any prompt-related arrays/objects
-            const promptObjects = allGlobals.filter(function(k) {
-                const val = window[k];
-                return (typeof val === 'object' || Array.isArray(val)) && (
-                    k.toLowerCase().indexOf('prompt') !== -1 ||
-                    k.toLowerCase().indexOf('extension') !== -1
-                );
-            });
-            console.log('[' + MODULE_NAME + '] Prompt-related objects/arrays:', promptObjects);
-            
-            // Check each one
-            promptObjects.forEach(function(k) {
-                console.log('[' + MODULE_NAME + '] window.' + k + ':', window[k]);
-            });
-            
-            // Check eventSource events
-            if (typeof eventSource !== 'undefined') {
-                if (eventSource._events) {
-                    console.log('[' + MODULE_NAME + '] Available eventSource events:', Object.keys(eventSource._events));
-                }
-            } else {
-                console.log('[' + MODULE_NAME + '] eventSource does NOT exist globally');
-                
-                // Check if it's inside SillyTavern
-                if (typeof SillyTavern !== 'undefined' && SillyTavern.eventSource) {
-                    console.log('[' + MODULE_NAME + '] Found SillyTavern.eventSource!');
-                    if (SillyTavern.eventSource._events) {
-                        console.log('[' + MODULE_NAME + '] Events:', Object.keys(SillyTavern.eventSource._events));
-                    }
-                }
-            }
-            
-            console.log('[' + MODULE_NAME + '] ---');
-            console.log('[' + MODULE_NAME + '] RECOMMENDATION: Copy this console output and send to developer');
-            
-            updateUI('status', 'Check console for detailed API information');
-            console.log('[' + MODULE_NAME + '] ========================================');
+            await injectContextBeforeGeneration();
+            updateUI('status', 'Injection attempted (see console)');
         });
-        console.log('[' + MODULE_NAME + '] Test injection button handler attached');
     }
     
-    // Test Hybrid Search
     const testHybridBtn = document.getElementById('ragfordummies_test_hybrid');
     if (testHybridBtn) {
         testHybridBtn.addEventListener('click', async function() {
@@ -2233,7 +1548,6 @@ function attachEventListeners() {
                 const collectionName = prefix + chatId;
                 log('Collection: ' + collectionName);
                 
-                // Check collection
                 const pointCount = await countPoints(collectionName);
                 log('Indexed messages: ' + pointCount);
                 
@@ -2243,10 +1557,8 @@ function attachEventListeners() {
                     return;
                 }
                 
-                // Get query
                 let query = queryInput ? queryInput.value.trim() : '';
                 if (!query) {
-                    // Use last 3 messages as default
                     const context = SillyTavern.getContext();
                     const recentMessages = context.chat.slice(-3);
                     query = recentMessages.map(function(m) { return m.mes; }).join(' ');
@@ -2256,7 +1568,6 @@ function attachEventListeners() {
                 log('Query: "' + query.substring(0, 100) + (query.length > 100 ? '...' : '') + '"');
                 log('');
                 
-                // Extract filter terms (all significant words, not just capitalized)
                 const filterTerms = extractQueryFilterTerms(query);
                 log('===== FILTER TERM EXTRACTION =====');
                 if (filterTerms.length > 0) {
@@ -2267,21 +1578,18 @@ function attachEventListeners() {
                 }
                 log('');
                 
-                // Generate embedding
                 log('Generating query embedding...');
                 updateUI('status', 'Generating embedding...');
                 const queryEmbedding = await generateEmbedding(query);
                 log('Embedding dimensions: ' + queryEmbedding.length);
                 log('');
                 
-                // Run hybrid search manually to show detailed output
                 log('===== RUNNING HYBRID SEARCH =====');
                 updateUI('status', 'Running hybrid search...');
                 
                 let filteredResults = [];
                 let denseResults = [];
                 
-                // Run 1: Filtered search
                 if (filterTerms.length > 0) {
                     log('RUN 1: Filtered search (term matching)...');
                     
@@ -2297,7 +1605,7 @@ function attachEventListeners() {
                     try {
                         const filteredResult = await qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
                             vector: queryEmbedding,
-                            limit: extensionSettings.retrievalCount * 2,  // Get more to filter
+                            limit: extensionSettings.retrievalCount * 2,
                             score_threshold: extensionSettings.similarityThreshold,
                             with_payload: true,
                             filter: filter
@@ -2306,7 +1614,6 @@ function attachEventListeners() {
                         const rawResults = filteredResult.result || [];
                         log('Run 1 raw results from Qdrant: ' + rawResults.length);
                         
-                        // Validate that each result actually has matching proper_nouns
                         filteredResults = rawResults.filter(function(r) {
                             const resultNouns = r.payload.proper_nouns || [];
                             const hasMatch = resultNouns.some(function(noun) {
@@ -2338,8 +1645,7 @@ function attachEventListeners() {
                 }
                 log('');
                 
-                // Run 2: Dense search (if needed)
-                const requiredFiltered = extensionSettings.retrievalCount || 5; // use your setting
+                const requiredFiltered = extensionSettings.retrievalCount || 5;
                 if (filteredResults.length < requiredFiltered) {
                     log('RUN 2: Dense search (filtered returned ' + filteredResults.length + ' < ' + requiredFiltered + ')...');
                     
@@ -2363,7 +1669,6 @@ function attachEventListeners() {
                 }
                 log('');
                 
-                // Combine results
                 const combined = [];
                 const seenIds = new Set();
                 
@@ -2420,7 +1725,6 @@ function attachEventListeners() {
                 updateUI('status', '✗ Test failed: ' + error.message);
             }
         });
-        console.log('[' + MODULE_NAME + '] Test hybrid search button handler attached');
     }
     
     const indexCurrentBtn = document.getElementById('ragfordummies_index_current');
@@ -2485,14 +1789,12 @@ function attachEventListeners() {
             try {
                 const content = await file.text();
                 
-                // Detect file type by extension
                 const isTxt = /\.txt$/i.test(file.name);
                 const isJsonl = /\.jsonl$/i.test(file.name);
                 if (!isTxt && !isJsonl) {
                     throw new Error('Unsupported file type. Please upload .jsonl or .txt');
                 }
                 
-                // Decide target collection
                 const mergeCheckbox = document.getElementById('ragfordummies_merge_uploads');
                 const shouldMerge = mergeCheckbox && mergeCheckbox.checked;
                 
@@ -2518,13 +1820,10 @@ function attachEventListeners() {
                 let jsonlToIndex = '';
                 
                 if (isTxt) {
-                    // Convert text -> JSONL
                     jsonlToIndex = convertTextToJSONL(content);
                 } else {
-                    // JSONL path
                     jsonlToIndex = content;
                     if (!shouldMerge) {
-                        // Try to extract chat_id_hash for a separate collection
                         const parsed = parseJSONL(content);
                         if (parsed.chatMetadata && parsed.chatMetadata.chat_id_hash) {
                             targetChatId = parsed.chatMetadata.chat_id_hash;
@@ -2574,13 +1873,12 @@ function loadSettings() {
 async function init() {
     loadSettings();
     
-    // CRITICAL: Stop any existing polling from previous loads
     if (pollingInterval) {
         console.log('[' + MODULE_NAME + '] Clearing existing polling interval from previous load');
         clearInterval(pollingInterval);
         pollingInterval = null;
     }
-    usePolling = false; // Start with polling disabled
+    usePolling = false;
     
     const settingsHtml = createSettingsUI();
     $('#extensions_settings').append(settingsHtml);
@@ -2619,7 +1917,6 @@ async function init() {
     
     console.log('[' + MODULE_NAME + '] Registering event handlers...');
     
-    // Get eventSource from context if not global
     let eventSourceToUse = null;
     
     if (typeof eventSource !== 'undefined') {
@@ -2642,41 +1939,34 @@ async function init() {
         eventSourceToUse.on('message_swiped', onMessageSwiped);
         eventSourceToUse.on('message_deleted', onMessageDeleted);
         
-        // CRITICAL: Use GENERATION_AFTER_COMMANDS for injection
-        // This fires BEFORE prompt assembly, so setExtensionPrompt will work!
-        // (chat_completion_prompt_ready fires AFTER assembly - too late)
         eventSourceToUse.on('GENERATION_AFTER_COMMANDS', async function(data) {
             console.log('[' + MODULE_NAME + '] Event: GENERATION_AFTER_COMMANDS');
             await injectContextWithSetExtensionPrompt();
         });
         
-        // Fallback: Also try generate_before_combine_prompts 
         eventSourceToUse.on('generate_before_combine_prompts', async function(data) {
             console.log('[' + MODULE_NAME + '] Event: generate_before_combine_prompts');
             await injectContextWithSetExtensionPrompt();
         });
         
-        // Keep chat_completion_prompt_ready for logging only
         eventSourceToUse.on('chat_completion_prompt_ready', async function(data) {
             console.log('[' + MODULE_NAME + '] Event: chat_completion_prompt_ready (chat length: ' + (data && data.chat ? data.chat.length : 'N/A') + ')');
-            // Don't inject here - too late! Just log for debugging
         });
         
         console.log('[' + MODULE_NAME + '] Registered listeners for: GENERATION_AFTER_COMMANDS, generate_before_combine_prompts');
         
-        eventsRegistered = true; // Mark that events are working
-        usePolling = false; // Disable polling since events work
+        eventsRegistered = true;
+        usePolling = false;
         
         console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
         
-        // List all available events for debugging
         if (eventSourceToUse._events) {
             console.log('[' + MODULE_NAME + '] All registered events on eventSource:', Object.keys(eventSourceToUse._events));
         }
     } else {
         console.log('[' + MODULE_NAME + '] eventSource not available');
         eventsRegistered = false;
-        usePolling = true; // Need polling as fallback
+        usePolling = true;
     }
     
     if (typeof window.generateQuietPrompt !== 'undefined') {
@@ -2697,49 +1987,14 @@ async function init() {
         generateQuietPrompt: typeof window.generateQuietPrompt !== 'undefined'
     });
     
-    // Check for context.eventSource
     if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
         const context = SillyTavern.getContext();
         console.log('[' + MODULE_NAME + '] context.eventSource exists:', !!context.eventSource);
         console.log('[' + MODULE_NAME + '] context.setExtensionPrompt exists:', !!context.setExtensionPrompt);
     }
     
-    // Detailed API discovery
-    console.log('[' + MODULE_NAME + '] ===== SillyTavern API Discovery =====');
-    
-    if (typeof extension_prompts !== 'undefined') {
-        console.log('[' + MODULE_NAME + '] extension_prompts exists:', extension_prompts);
-    }
-    
-    if (typeof SillyTavern !== 'undefined') {
-        console.log('[' + MODULE_NAME + '] SillyTavern object keys:', Object.keys(SillyTavern));
-        if (SillyTavern.extensions) {
-            console.log('[' + MODULE_NAME + '] SillyTavern.extensions:', SillyTavern.extensions);
-        }
-        if (SillyTavern.setExtensionPrompt) {
-            console.log('[' + MODULE_NAME + '] SillyTavern.setExtensionPrompt EXISTS!');
-        }
-        if (SillyTavern.eventSource) {
-            console.log('[' + MODULE_NAME + '] SillyTavern.eventSource EXISTS!');
-        }
-    }
-    
-    if (typeof eventSource !== 'undefined' && eventSource._events) {
-        const events = Object.keys(eventSource._events);
-        console.log('[' + MODULE_NAME + '] EventSource has ' + events.length + ' events registered');
-        console.log('[' + MODULE_NAME + '] Event names:', events);
-    } else {
-        console.log('[' + MODULE_NAME + '] eventSource not available as global');
-        if (typeof SillyTavern !== 'undefined' && SillyTavern.eventSource && SillyTavern.eventSource._events) {
-            const events = Object.keys(SillyTavern.eventSource._events);
-            console.log('[' + MODULE_NAME + '] But SillyTavern.eventSource exists with ' + events.length + ' events');
-            console.log('[' + MODULE_NAME + '] Event names:', events);
-        }
-    }
-    
     console.log('[' + MODULE_NAME + '] =========================================');
     
-    // Only start polling if events weren't registered
     if (!eventsRegistered && usePolling) {
         console.log('[' + MODULE_NAME + '] Events not available, using polling fallback');
         
@@ -2752,8 +2007,6 @@ async function init() {
         console.log('[' + MODULE_NAME + '] Events registered, polling NOT started (not needed)');
     }
     
-    // IMPORTANT: Check if current chat is already indexed on load
-    // This handles the case where chat_loaded event doesn't fire (chat already open)
     setTimeout(async function() {
         console.log('[' + MODULE_NAME + '] Running initial index status check...');
         const chatId = getCurrentChatId();
