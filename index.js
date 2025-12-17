@@ -2606,4 +2606,3 @@ jQuery(async function() {
         await init();
     }, 100);
 });
-```
