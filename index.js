@@ -5,7 +5,7 @@
 
 const MODULE_NAME = 'RagForDummies';
 
-// Whitelist-only logging for this module
+// Whitelist/allowlist logging for this module
 const MODULE_LOG_WHITELIST = [
     'Settings loaded',
     'Extension loaded successfully',
@@ -13,12 +13,22 @@ const MODULE_LOG_WHITELIST = [
     'Content found',
     'Initial check'
 ];
+const MODULE_LOG_ALLOW_SUBSTR = [
+    'Indexed message',
+    'Deleted existing point',
+    'Delete:',
+    'Swipe:',
+    'HYBRID SEARCH',
+    'Hybrid search'
+];
 const __origConsoleLog = console.log.bind(console);
 console.log = function(...args) {
     if (args.length && typeof args[0] === 'string' && args[0].startsWith('[' + MODULE_NAME + ']')) {
         const msg = args[0];
-        if (!MODULE_LOG_WHITELIST.some(k => msg.indexOf(k) !== -1)) {
-            return; // suppress non-whitelisted module logs
+        const whitelisted = MODULE_LOG_WHITELIST.some(k => msg.indexOf(k) !== -1);
+        const allowSubstr = MODULE_LOG_ALLOW_SUBSTR.some(k => msg.indexOf(k) !== -1);
+        if (!whitelisted && !allowSubstr) {
+            return; // suppress non-whitelisted/non-allowed module logs
         }
     }
     __origConsoleLog(...args);
@@ -32,7 +42,7 @@ const defaultSettings = {
     qdrantCloudUrl: '',
     qdrantApiKey: '',
     embeddingProvider: 'kobold',
-    koboldUrl: 'http://localhost:5001',
+    koboldUrl: 'http://localhost:11434', // updated default
     ollamaUrl: 'http://localhost:11434',
     ollamaModel: 'nomic-embed-text',
     openaiApiKey: '',
@@ -1744,7 +1754,7 @@ function createSettingsUI() {
                         
                         '<label id="ragfordummies_kobold_settings" style="' + (extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none') + '">' +
                             '<span>KoboldCpp URL:</span>' +
-                            '<input type="text" id="ragfordummies_kobold_url" value="' + extensionSettings.koboldUrl + '" placeholder="http://localhost:5001" />' +
+                            '<input type="text" id="ragfordummies_kobold_url" value="' + extensionSettings.koboldUrl + '" placeholder="http://localhost:11434" />' +
                         '</label>' +
                         
                         '<div id="ragfordummies_ollama_settings" style="' + (extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none') + '">' +
