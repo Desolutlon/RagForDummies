@@ -998,7 +998,6 @@ function getActiveCharacterName() {
         }
         if (!context) return null;
 
-        // Common places SillyTavern stores the main/assistant character
         if (context.character && context.character.name) return context.character.name;
         if (context.chatMetadata && context.chatMetadata.character_name) return context.chatMetadata.character_name;
         if (context.main && context.main.name) return context.main.name;
@@ -2125,15 +2124,19 @@ async function init() {
         eventSourceToUse.on('message_swiped', onMessageSwiped);
         eventSourceToUse.on('message_deleted', onMessageDeleted);
         
-        eventSourceToUse.on('GENERATION_AFTER_COMMANDS', async function(data) {
-            console.log('[' + MODULE_NAME + '] Event: GENERATION_AFTER_COMMANDS');
-            await injectContextWithSetExtensionPrompt();
-        });
-        
-        eventSourceToUse.on('generate_before_combine_prompts', async function(data) {
-            console.log('[' + MODULE_NAME + '] Event: generate_before_combine_prompts');
-            await injectContextWithSetExtensionPrompt();
-        });
+        if (typeof injectContextWithSetExtensionPrompt === 'function') {
+            eventSourceToUse.on('GENERATION_AFTER_COMMANDS', async function(data) {
+                console.log('[' + MODULE_NAME + '] Event: GENERATION_AFTER_COMMANDS');
+                await injectContextWithSetExtensionPrompt();
+            });
+            
+            eventSourceToUse.on('generate_before_combine_prompts', async function(data) {
+                console.log('[' + MODULE_NAME + '] Event: generate_before_combine_prompts');
+                await injectContextWithSetExtensionPrompt();
+            });
+        } else {
+            console.warn('[' + MODULE_NAME + '] injectContextWithSetExtensionPrompt is undefined; skipping wiring.');
+        }
         
         eventSourceToUse.on('chat_completion_prompt_ready', async function(data) {
             console.log('[' + MODULE_NAME + '] Event: chat_completion_prompt_ready (chat length: ' + (data && data.chat ? data.chat.length : 'N/A') + ')');
