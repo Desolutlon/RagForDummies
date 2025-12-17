@@ -1161,36 +1161,61 @@ async function onMessageSwiped(data) {
     const isGroupChat = isCurrentChatGroupChat();
     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
 
-    if (!currentChatIndexed) {
+    // Determine which index was swiped
+    let targetIndex = null;
+    if (typeof data === 'number') {
+        targetIndex = data;
+    } else if (data && typeof data.index === 'number') {
+        targetIndex = data.index;
+    }
+
+    // Delay slightly to ensure SillyTavern updates the chat array after swipe
+    setTimeout(async () => {
         try {
-            const pointCount = await countPoints(collectionName);
-            if (pointCount > 0) {
-                currentChatIndexed = true;
-            } else {
-                console.log('[' + MODULE_NAME + '] Swipe: collection empty, skipping');
+            if (!currentChatIndexed) {
+                try {
+                    const pointCount = await countPoints(collectionName);
+                    if (pointCount > 0) {
+                        currentChatIndexed = true;
+                    } else {
+                        console.log('[' + MODULE_NAME + '] Swipe: collection empty, skipping');
+                        return;
+                    }
+                } catch (e) {
+                    console.log('[' + MODULE_NAME + '] Swipe: could not verify collection, skipping');
+                    return;
+                }
+            }
+
+            let context = null;
+            if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+                context = SillyTavern.getContext();
+            } else if (typeof getContext === 'function') {
+                context = getContext();
+            }
+            if (!context || !context.chat || context.chat.length === 0) return;
+
+            // Fallback to last message if no index provided
+            if (targetIndex === null || targetIndex < 0 || targetIndex >= context.chat.length) {
+                targetIndex = context.chat.length - 1;
+            }
+
+            const message = context.chat[targetIndex];
+            if (!message) {
+                console.log('[' + MODULE_NAME + '] Swipe: message not found at index ' + targetIndex);
                 return;
             }
-        } catch (e) {
-            console.log('[' + MODULE_NAME + '] Swipe: could not verify collection, skipping');
-            return;
+
+            await deleteMessageByIndex(collectionName, chatId, targetIndex);
+            await indexSingleMessage(message, chatId, targetIndex, isGroupChat);
+
+            indexedMessageIds.add(targetIndex);
+            console.log('[' + MODULE_NAME + '] Swipe: re-indexed message ' + targetIndex);
+        } catch (err) {
+            console.error('[' + MODULE_NAME + '] Swipe reindex failed:', err);
         }
-    }
-
-    let context;
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-        context = SillyTavern.getContext();
-    } else if (typeof getContext === 'function') {
-        context = getContext();
-    }
-    if (!context || !context.chat || context.chat.length === 0) return;
-
-    const messageIndex = context.chat.length - 1;
-    const message = context.chat[messageIndex];
-
-    await deleteMessageByIndex(collectionName, chatId, messageIndex);
-    await indexSingleMessage(message, chatId, messageIndex, isGroupChat);
-
-    console.log('[' + MODULE_NAME + '] Swipe: re-indexed message ' + messageIndex);
+    }, 50);
+}
 }
 
 async function onMessageDeleted(data) {
