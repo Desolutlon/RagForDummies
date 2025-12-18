@@ -1297,8 +1297,8 @@ async function onMessageSwiped(data) {
         targetIndex = data.index;
     }
 
-    // helper: wait for chat to reflect the new swiped message
-    async function waitForSwipedMessage(idx, maxWaitMs = 1500) {
+    // helper: wait for chat to reflect the new swiped message and let it stabilize
+    async function waitForSwipedMessage(idx, maxWaitMs = 2000) {
         const start = Date.now();
         const initial = (() => {
             const ctx = typeof SillyTavern !== 'undefined'
@@ -1307,15 +1307,31 @@ async function onMessageSwiped(data) {
             return (ctx && ctx.chat && ctx.chat[idx]) ? ctx.chat[idx].mes : null;
         })();
 
+        let lastSeen = initial;
+        let stableCount = 0;
+        const requiredStable = 2; // require two consecutive reads of the same, changed value
+
         while (Date.now() - start < maxWaitMs) {
             await new Promise(res => setTimeout(res, 75));
             const ctx = typeof SillyTavern !== 'undefined'
                 ? SillyTavern.getContext()
                 : (typeof getContext === 'function' ? getContext() : null);
             if (!ctx || !ctx.chat || !ctx.chat[idx]) continue;
+
             const currentMes = ctx.chat[idx].mes;
-            if (initial === null || currentMes !== initial) {
-                return ctx;
+            const changed = (initial === null) || (currentMes !== initial);
+
+            if (!changed) continue; // still old value
+
+            if (currentMes === lastSeen) {
+                stableCount += 1;
+            } else {
+                stableCount = 1;
+                lastSeen = currentMes;
+            }
+
+            if (stableCount >= requiredStable) {
+                return ctx; // changed and stabilized
             }
         }
         // fallback: latest context
