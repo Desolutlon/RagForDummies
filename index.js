@@ -810,12 +810,11 @@ function extractPayload(message, messageIndex, chatIdHash) {
     };
 }
 
-// Helper: return the last non-system, non-empty message (user or assistant)
-// Helper: return the message being replied to (prior non-system if last is assistant/character)
+// Helper: return the message being replied to (previous non-system); if none, use last non-system
 function getQueryMessage(context) {
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
 
-    // Find the last non-system message
+    // Find last non-system
     let lastIdx = -1;
     for (let i = context.chat.length - 1; i >= 0; i--) {
         const msg = context.chat[i];
@@ -826,22 +825,18 @@ function getQueryMessage(context) {
     }
     if (lastIdx === -1) return null;
 
-    const lastMsg = context.chat[lastIdx];
-    const isUser = lastMsg.is_user || lastMsg.role === 'user';
-
-    // If last is user, use it; if last is assistant/character, use the previous non-system
-    if (isUser) return lastMsg;
-
+    // Find the previous non-system before the last one
     for (let i = lastIdx - 1; i >= 0; i--) {
         const msg = context.chat[i];
         if (!msg || !msg.mes || !msg.mes.trim()) continue;
         if (msg.is_system) continue;
-        return msg;
+        return msg; // previous turn
     }
 
-    // Fallback to the last non-system
-    return lastMsg;
+    // If no previous turn, fall back to last non-system
+    return context.chat[lastIdx];
 }
+
 async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
     if (isGroupChat === undefined) isGroupChat = false;
     
@@ -884,7 +879,7 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
         
         await createCollection(collectionName, vectorSize);
         
-        const EMBEDDING_BATCH_SIZE = 1024;  // Process 32 messages at once for GPU batching
+        const EMBEDDING_BATCH_SIZE = 1024;  // Process 1024 messages at once for GPU batching
         const batchSize = 10;  // Qdrant upsert batch size
         const points = [];
 
@@ -1295,7 +1290,7 @@ async function onMessageSwiped(data) {
     }
 
     // helper: wait for chat to reflect the new swiped message
-    async function waitForSwipedMessage(idx, maxWaitMs = 300) {
+    async function waitForSwipedMessage(idx, maxWaitMs = 1000) {
         const start = Date.now();
         const initial = (() => {
             const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
