@@ -815,7 +815,6 @@ function extractPayload(message, messageIndex, chatIdHash) {
 // If the last non-system is a user turn, use it.
 // If the last non-system is assistant/character, use the previous non-system turn.
 function getQueryMessage(context) {
-function getQueryMessage(context) {
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
     for (let i = context.chat.length - 1; i >= 0; i--) {
         const msg = context.chat[i];
