@@ -370,7 +370,7 @@ async function createCollection(collectionName, vectorSize) {
             }
         });
         
-        console.log('[' + MODULE_NAME + '] Created collection: ' + collectionName');
+        console.log('[' + MODULE_NAME + '] Created collection: ' + collectionName);
         await createPayloadIndex(collectionName);
         return true;
     } catch (error) {
