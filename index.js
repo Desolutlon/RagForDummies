@@ -810,7 +810,10 @@ function extractPayload(message, messageIndex, chatIdHash) {
     };
 }
 
-// Helper: return the message being replied to (previous non-system); if none, use last non-system
+
+// Helper: return the turn being replied to.
+// If the last non-system is a user turn, use it.
+// If the last non-system is assistant/character, use the previous non-system turn.
 function getQueryMessage(context) {
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
 
@@ -825,16 +828,21 @@ function getQueryMessage(context) {
     }
     if (lastIdx === -1) return null;
 
-    // Find the previous non-system before the last one
+    const lastMsg = context.chat[lastIdx];
+    const isUser = lastMsg.is_user || lastMsg.role === 'user';
+
+    // If last is user, query it; if last is assistant/character, query the previous non-system
+    if (isUser) return lastMsg;
+
     for (let i = lastIdx - 1; i >= 0; i--) {
         const msg = context.chat[i];
         if (!msg || !msg.mes || !msg.mes.trim()) continue;
         if (msg.is_system) continue;
-        return msg; // previous turn
+        return msg; // previous non-system turn
     }
 
-    // If no previous turn, fall back to last non-system
-    return context.chat[lastIdx];
+    // Fallback: last non-system
+    return lastMsg;
 }
 
 async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
