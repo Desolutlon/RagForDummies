@@ -842,7 +842,7 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
         
         await createCollection(collectionName, vectorSize);
         
-        const EMBEDDING_BATCH_SIZE = 32;  // Process 32 messages at once for GPU batching
+        const EMBEDDING_BATCH_SIZE = 256;  // Process 32 messages at once for GPU batching
         const batchSize = 10;  // Qdrant upsert batch size
         const points = [];
 
