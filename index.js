@@ -1,3 +1,4 @@
+```javascript
 /**
  * RagForDummies - A RAG extension for SillyTavern that actually works
  * Supports group chats with Qdrant vector storage
@@ -810,34 +811,16 @@ function extractPayload(message, messageIndex, chatIdHash) {
     };
 }
 
-// Helper to choose the query message: prefer the last user/non-system message; if latest is assistant, use the previous non-system message
+// Helper: return the last non-system, non-empty message (user or assistant)
 function getQueryMessage(context) {
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
-
-    // Find last non-system
-    let lastIdx = -1;
     for (let i = context.chat.length - 1; i >= 0; i--) {
-        const msg = context.chat[i];
-        if (!msg || !msg.mes || !msg.mes.trim()) continue;
-        if (msg.is_system) continue;
-        lastIdx = i;
-        break;
-    }
-    if (lastIdx === -1) return null;
-
-    const lastMsg = context.chat[lastIdx];
-    const isUser = lastMsg.is_user || lastMsg.role === 'user';
-    if (isUser) return lastMsg;
-
-    // Otherwise, pick the previous non-system message if it exists
-    for (let i = lastIdx - 1; i >= 0; i--) {
         const msg = context.chat[i];
         if (!msg || !msg.mes || !msg.mes.trim()) continue;
         if (msg.is_system) continue;
         return msg;
     }
-    // Fallback to the last non-system if nothing else
-    return lastMsg;
+    return null;
 }
 
 async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
@@ -2428,3 +2411,4 @@ jQuery(async function() {
         await init();
     }, 100);
 });
+```
