@@ -811,27 +811,25 @@ function extractPayload(message, messageIndex, chatIdHash) {
 }
 
 
-// Helper: return the turn being replied to.
-// If the last non-system is a user turn, use it.
-// If the last non-system is assistant/character, use the previous non-system turn.
-function getQueryMessage(context) {
+function getQueryMessage(context, idxOverride = null) {
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
 
-    let lastNonSystem = null;
-    // Walk backward to find the most recent user message
+    // If a specific index is provided (e.g., the swiped slot), try that first
+    if (idxOverride !== null && idxOverride >= 0 && idxOverride < context.chat.length) {
+        const m = context.chat[idxOverride];
+        if (m && m.mes && m.mes.trim() && !m.is_system) {
+            return m;
+        }
+    }
+
+    // Otherwise, return the latest non-system turn (user or character)
     for (let i = context.chat.length - 1; i >= 0; i--) {
         const msg = context.chat[i];
         if (!msg || !msg.mes || !msg.mes.trim()) continue;
         if (msg.is_system) continue;
-
-        if (!lastNonSystem) lastNonSystem = msg;
-        if (msg.is_user || msg.role === 'user') {
-            return msg; // latest user turn
-        }
+        return msg;
     }
-
-    // Fallback: latest non-system (if no user turn found)
-    return lastNonSystem;
+    return null;
 }
 async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
     if (isGroupChat === undefined) isGroupChat = false;
