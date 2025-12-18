@@ -1298,24 +1298,30 @@ async function onMessageSwiped(data) {
     }
 
     // helper: wait for chat to reflect the new swiped message
-    async function waitForSwipedMessage(idx, maxWaitMs = 1000) {
+    async function waitForSwipedMessage(idx, maxWaitMs = 1500) {
         const start = Date.now();
         const initial = (() => {
-            const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
+            const ctx = typeof SillyTavern !== 'undefined'
+                ? SillyTavern.getContext()
+                : (typeof getContext === 'function' ? getContext() : null);
             return (ctx && ctx.chat && ctx.chat[idx]) ? ctx.chat[idx].mes : null;
         })();
 
         while (Date.now() - start < maxWaitMs) {
-            await new Promise(res => setTimeout(res, 50));
-            const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
+            await new Promise(res => setTimeout(res, 75));
+            const ctx = typeof SillyTavern !== 'undefined'
+                ? SillyTavern.getContext()
+                : (typeof getContext === 'function' ? getContext() : null);
             if (!ctx || !ctx.chat || !ctx.chat[idx]) continue;
             const currentMes = ctx.chat[idx].mes;
             if (initial === null || currentMes !== initial) {
                 return ctx;
             }
         }
-        // fallback: return latest context after wait
-        const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
+        // fallback: latest context
+        const ctx = typeof SillyTavern !== 'undefined'
+            ? SillyTavern.getContext()
+            : (typeof getContext === 'function' ? getContext() : null);
         return ctx;
     }
 
@@ -1337,7 +1343,9 @@ async function onMessageSwiped(data) {
             }
 
             const ctx = await waitForSwipedMessage(
-                targetIndex !== null ? targetIndex : (typeof SillyTavern !== 'undefined' ? SillyTavern.getContext().chat.length - 1 : 0)
+                targetIndex !== null
+                    ? targetIndex
+                    : (typeof SillyTavern !== 'undefined' ? SillyTavern.getContext().chat.length - 1 : 0)
             );
             if (!ctx || !ctx.chat || ctx.chat.length === 0) return;
 
@@ -1361,7 +1369,6 @@ async function onMessageSwiped(data) {
         }
     })();
 }
-
 async function onMessageDeleted(data) {
     console.log('[' + MODULE_NAME + '] ===== MESSAGE DELETED EVENT FIRED =====');
 
