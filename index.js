@@ -1278,46 +1278,45 @@ async function onMessageSwiped(data) {
     }
 
     // helper: wait for chat to reflect the new swiped message and let it stabilize
-    async function waitForSwipedMessage(idx, maxWaitMs = 2000) {
+    async function waitForSwipedMessage(idx, maxWaitMs = 2500) {
         const start = Date.now();
-        const initial = (() => {
+
+        const readCtx = () => {
             const ctx = typeof SillyTavern !== 'undefined'
                 ? SillyTavern.getContext()
                 : (typeof getContext === 'function' ? getContext() : null);
-            return (ctx && ctx.chat && ctx.chat[idx]) ? ctx.chat[idx].mes : null;
-        })();
+            const mes = (ctx && ctx.chat && ctx.chat[idx]) ? ctx.chat[idx].mes : null;
+            return { ctx, mes };
+        };
 
+        const { mes: initial } = readCtx();
         let lastSeen = initial;
         let stableCount = 0;
-        const requiredStable = 2; // require two consecutive reads of the same, changed value
+        const requiredStable = 2; // two consecutive reads of the changed value
 
         while (Date.now() - start < maxWaitMs) {
-            await new Promise(res => setTimeout(res, 75));
-            const ctx = typeof SillyTavern !== 'undefined'
-                ? SillyTavern.getContext()
-                : (typeof getContext === 'function' ? getContext() : null);
+            await new Promise(res => setTimeout(res, 100));
+            const { ctx, mes } = readCtx();
             if (!ctx || !ctx.chat || !ctx.chat[idx]) continue;
 
-            const currentMes = ctx.chat[idx].mes;
-            const changed = (initial === null) || (currentMes !== initial);
+            const changed = (initial === null) || (mes !== initial);
+            if (!changed) continue;
 
-            if (!changed) continue; // still old value
-
-            if (currentMes === lastSeen) {
+            if (mes === lastSeen) {
                 stableCount += 1;
             } else {
                 stableCount = 1;
-                lastSeen = currentMes;
+                lastSeen = mes;
             }
 
             if (stableCount >= requiredStable) {
-                return ctx; // changed and stabilized
+                // extra settle
+                await new Promise(res => setTimeout(res, 100));
+                return ctx;
             }
         }
-        // fallback: latest context
-        const ctx = typeof SillyTavern !== 'undefined'
-            ? SillyTavern.getContext()
-            : (typeof getContext === 'function' ? getContext() : null);
+        // fallback to latest context
+        const { ctx } = readCtx();
         return ctx;
     }
 
