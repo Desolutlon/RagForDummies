@@ -676,6 +676,12 @@ async function generateKoboldEmbedding(text) {
 }
 
 async function generateOllamaEmbedding(text) {
+    const isArray = Array.isArray(text);
+    if (isArray) {
+        // Ollama does not batch in one call; run in parallel
+        return Promise.all(text.map(t => generateOllamaEmbedding(t)));
+    }
+
     const response = await fetch(extensionSettings.ollamaUrl + '/api/embeddings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -694,6 +700,9 @@ async function generateOllamaEmbedding(text) {
 }
 
 async function generateOpenAIEmbedding(text) {
+    const isArray = Array.isArray(text);
+    const input = isArray ? text : [text];
+
     const response = await fetch('https://api.openai.com/v1/embeddings', {
         method: 'POST',
         headers: {
@@ -702,7 +711,7 @@ async function generateOpenAIEmbedding(text) {
         },
         body: JSON.stringify({
             model: extensionSettings.openaiModel,
-            input: text
+            input: input
         })
     });
     
@@ -711,7 +720,8 @@ async function generateOpenAIEmbedding(text) {
     }
     
     const data = await response.json();
-    return data.data[0].embedding;
+    const embeddings = data.data.map(d => d.embedding);
+    return isArray ? embeddings : embeddings[0];
 }
 
 // ===========================
@@ -842,7 +852,7 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
         
         await createCollection(collectionName, vectorSize);
         
-        const EMBEDDING_BATCH_SIZE = 1024;  // Process 32 messages at once for GPU batching
+        const EMBEDDING_BATCH_SIZE = 32;  // Process 32 messages at once for GPU batching
         const batchSize = 10;  // Qdrant upsert batch size
         const points = [];
 
@@ -1252,7 +1262,29 @@ async function onMessageSwiped(data) {
         targetIndex = data.index;
     }
 
-    setTimeout(async () => {
+    // helper: wait for chat to reflect the new swiped message
+    async function waitForSwipedMessage(idx, maxWaitMs = 300) {
+        const start = Date.now();
+        const initial = (() => {
+            const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
+            return (ctx && ctx.chat && ctx.chat[idx]) ? ctx.chat[idx].mes : null;
+        })();
+
+        while (Date.now() - start < maxWaitMs) {
+            await new Promise(res => setTimeout(res, 50));
+            const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
+            if (!ctx || !ctx.chat || !ctx.chat[idx]) continue;
+            const currentMes = ctx.chat[idx].mes;
+            if (initial === null || currentMes !== initial) {
+                return ctx;
+            }
+        }
+        // fallback: return latest context after wait
+        const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
+        return ctx;
+    }
+
+    (async () => {
         try {
             if (!currentChatIndexed) {
                 try {
@@ -1269,19 +1301,16 @@ async function onMessageSwiped(data) {
                 }
             }
 
-            let context = null;
-            if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-                context = SillyTavern.getContext();
-            } else if (typeof getContext === 'function') {
-                context = getContext();
-            }
-            if (!context || !context.chat || context.chat.length === 0) return;
+            const ctx = await waitForSwipedMessage(
+                targetIndex !== null ? targetIndex : (typeof SillyTavern !== 'undefined' ? SillyTavern.getContext().chat.length - 1 : 0)
+            );
+            if (!ctx || !ctx.chat || ctx.chat.length === 0) return;
 
-            if (targetIndex === null || targetIndex < 0 || targetIndex >= context.chat.length) {
-                targetIndex = context.chat.length - 1;
+            if (targetIndex === null || targetIndex < 0 || targetIndex >= ctx.chat.length) {
+                targetIndex = ctx.chat.length - 1;
             }
 
-            const message = context.chat[targetIndex];
+            const message = ctx.chat[targetIndex];
             if (!message) {
                 console.log('[' + MODULE_NAME + '] Swipe: message not found at index ' + targetIndex);
                 return;
@@ -1295,7 +1324,7 @@ async function onMessageSwiped(data) {
         } catch (err) {
             console.error('[' + MODULE_NAME + '] Swipe reindex failed:', err);
         }
-    }, 50);
+    })();
 }
 
 async function onMessageDeleted(data) {
