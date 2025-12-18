@@ -370,7 +370,7 @@ async function createCollection(collectionName, vectorSize) {
             }
         });
         
-        console.log('[' + MODULE_NAME + '] Created collection: ' + collectionName);
+        console.log('[' + MODULE_NAME + '] Created collection: ' + collectionName');
         await createPayloadIndex(collectionName);
         return true;
     } catch (error) {
@@ -625,7 +625,7 @@ async function forceReindexCurrentChat() {
 }
 
 // ===========================
-// Embedding Provider Functions
+// Embedding Provider Functions (all support batching)
 // ===========================
 
 async function generateEmbedding(text) {
@@ -808,6 +808,36 @@ function extractPayload(message, messageIndex, chatIdHash) {
         location: (tracker.Characters && tracker.Characters[message.name] && tracker.Characters[message.name].Location) ? tracker.Characters[message.name].Location : '',
         proper_nouns: Array.from(contentNouns)
     };
+}
+
+// Helper to choose the query message: prefer the last user/non-system message; if latest is assistant, use the previous non-system message
+function getQueryMessage(context) {
+    if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
+
+    // Find last non-system
+    let lastIdx = -1;
+    for (let i = context.chat.length - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (!msg || !msg.mes || !msg.mes.trim()) continue;
+        if (msg.is_system) continue;
+        lastIdx = i;
+        break;
+    }
+    if (lastIdx === -1) return null;
+
+    const lastMsg = context.chat[lastIdx];
+    const isUser = lastMsg.is_user || lastMsg.role === 'user';
+    if (isUser) return lastMsg;
+
+    // Otherwise, pick the previous non-system message if it exists
+    for (let i = lastIdx - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (!msg || !msg.mes || !msg.mes.trim()) continue;
+        if (msg.is_system) continue;
+        return msg;
+    }
+    // Fallback to the last non-system if nothing else
+    return lastMsg;
 }
 
 async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
@@ -1452,7 +1482,7 @@ async function injectContextWithSetExtensionPrompt() {
     if (!context || !context.chat || context.chat.length === 0) return;
     if (!context.setExtensionPrompt || typeof context.setExtensionPrompt !== 'function') return;
 
-    const lastMessage = getLastRelevantMessage(context);
+    const lastMessage = getQueryMessage(context);
     if (!lastMessage || !lastMessage.mes) return;
 
     let query = lastMessage.mes;
@@ -1510,7 +1540,7 @@ async function injectContextBeforeGeneration(data) {
     }
     if (!context || !context.chat || context.chat.length === 0) return;
 
-    const lastMessage = getLastRelevantMessage(context);
+    const lastMessage = getQueryMessage(context);
     if (!lastMessage || !lastMessage.mes) return;
 
     let query = lastMessage.mes;
@@ -1830,7 +1860,7 @@ function attachEventListeners() {
                 }
                 
                 const context = SillyTavern.getContext();
-                const lastMessage = getLastRelevantMessage(context);
+                const lastMessage = getQueryMessage(context);
                 if (!lastMessage) {
                     updateUI('status', '✗ No valid message found');
                     return;
