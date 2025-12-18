@@ -816,13 +816,33 @@ function extractPayload(message, messageIndex, chatIdHash) {
 // If the last non-system is assistant/character, use the previous non-system turn.
 function getQueryMessage(context) {
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
+
+    // Find last non-system
+    let lastIdx = -1;
     for (let i = context.chat.length - 1; i >= 0; i--) {
         const msg = context.chat[i];
         if (!msg || !msg.mes || !msg.mes.trim()) continue;
         if (msg.is_system) continue;
-        return msg; // latest non-system turn (user or character)
+        lastIdx = i;
+        break;
     }
-    return null;
+    if (lastIdx === -1) return null;
+
+    const lastMsg = context.chat[lastIdx];
+    const isUser = lastMsg.is_user || lastMsg.role === 'user';
+
+    // If last is user, query it; if last is assistant/character, query the previous non-system
+    if (isUser) return lastMsg;
+
+    for (let i = lastIdx - 1; i >= 0; i--) {
+        const msg = context.chat[i];
+        if (!msg || !msg.mes || !msg.mes.trim()) continue;
+        if (msg.is_system) continue;
+        return msg;
+    }
+
+    // Fallback: last non-system
+    return lastMsg;
 }
 async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
     if (isGroupChat === undefined) isGroupChat = false;
