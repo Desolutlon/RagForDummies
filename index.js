@@ -817,32 +817,21 @@ function extractPayload(message, messageIndex, chatIdHash) {
 function getQueryMessage(context) {
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
 
-    // Find last non-system
-    let lastIdx = -1;
+    let lastNonSystem = null;
+    // Walk backward to find the most recent user message
     for (let i = context.chat.length - 1; i >= 0; i--) {
         const msg = context.chat[i];
         if (!msg || !msg.mes || !msg.mes.trim()) continue;
         if (msg.is_system) continue;
-        lastIdx = i;
-        break;
-    }
-    if (lastIdx === -1) return null;
 
-    const lastMsg = context.chat[lastIdx];
-    const isUser = lastMsg.is_user || lastMsg.role === 'user';
-
-    // If last is user, query it; if last is assistant/character, query the previous non-system
-    if (isUser) return lastMsg;
-
-    for (let i = lastIdx - 1; i >= 0; i--) {
-        const msg = context.chat[i];
-        if (!msg || !msg.mes || !msg.mes.trim()) continue;
-        if (msg.is_system) continue;
-        return msg;
+        if (!lastNonSystem) lastNonSystem = msg;
+        if (msg.is_user || msg.role === 'user') {
+            return msg; // latest user turn
+        }
     }
 
-    // Fallback: last non-system
-    return lastMsg;
+    // Fallback: latest non-system (if no user turn found)
+    return lastNonSystem;
 }
 async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
     if (isGroupChat === undefined) isGroupChat = false;
