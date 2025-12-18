@@ -648,11 +648,15 @@ async function generateEmbedding(text) {
 }
 
 async function generateKoboldEmbedding(text) {
+    // Handle both single text and array of texts for batching
+    const isArray = Array.isArray(text);
+    const input = isArray ? text : [text];
+    
     const response = await fetch(extensionSettings.koboldUrl + '/api/v1/embeddings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-            input: text,
+            input: input,  // Send as array for batching
             model: "text-embedding-ada-002"
         })
     });
@@ -662,7 +666,13 @@ async function generateKoboldEmbedding(text) {
     }
     
     const data = await response.json();
-    return data.data[0].embedding;
+    
+    // Return array of embeddings if input was array, single embedding otherwise
+    if (isArray) {
+        return data.data.map(d => d.embedding);
+    } else {
+        return data.data[0].embedding;
+    }
 }
 
 async function generateOllamaEmbedding(text) {
@@ -832,38 +842,50 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat) {
         
         await createCollection(collectionName, vectorSize);
         
-        const batchSize = 10;
+        const EMBEDDING_BATCH_SIZE = 32;  // Process 32 messages at once for GPU batching
+        const batchSize = 10;  // Qdrant upsert batch size
         const points = [];
-        
-        for (let i = 0; i < messages.length; i++) {
+
+        // Process messages in batches for embedding generation
+        for (let batchStart = 0; batchStart < messages.length; batchStart += EMBEDDING_BATCH_SIZE) {
             if (shouldStopIndexing) {
-                console.log('[' + MODULE_NAME + '] Indexing stopped by user at message ' + i);
-                updateUI('status', 'Stopped at ' + i + '/' + messages.length + ' messages');
+                console.log('[' + MODULE_NAME + '] Indexing stopped by user at message ' + batchStart);
+                updateUI('status', 'Stopped at ' + batchStart + '/' + messages.length + ' messages');
                 isIndexing = false;
                 shouldStopIndexing = false;
                 hideStopButton();
                 return false;
             }
             
-            const message = messages[i];
-            updateUI('status', 'Indexing ' + (i + 1) + '/' + messages.length + '...');
+            const batchEnd = Math.min(batchStart + EMBEDDING_BATCH_SIZE, messages.length);
+            const batchMessages = messages.slice(batchStart, batchEnd);
             
-            const embeddingText = buildEmbeddingText(message, message.tracker);
-            const embedding = await generateEmbedding(embeddingText);
-            const payload = extractPayload(message, i, chatIdHash);
+            updateUI('status', 'Indexing ' + batchStart + '-' + batchEnd + '/' + messages.length + '...');
             
-            points.push({
-                id: generateUUID(),
-                vector: embedding,
-                payload: payload
-            });
+            // Generate embeddings for entire batch at once (GPU batching!)
+            const embeddingTexts = batchMessages.map(msg => buildEmbeddingText(msg, msg.tracker));
+            const embeddings = await generateEmbedding(embeddingTexts);  // Batch call!
             
-            if (points.length >= batchSize) {
-                await upsertVectors(collectionName, points);
-                points.length = 0;
+            // Create points for this batch
+            for (let i = 0; i < batchMessages.length; i++) {
+                const message = batchMessages[i];
+                const messageIndex = batchStart + i;
+                const embedding = embeddings[i];
+                const payload = extractPayload(message, messageIndex, chatIdHash);
+                
+                points.push({
+                    id: generateUUID(),
+                    vector: embedding,
+                    payload: payload
+                });
+                
+                if (points.length >= batchSize) {
+                    await upsertVectors(collectionName, points);
+                    points.length = 0;
+                }
             }
         }
-        
+
         if (points.length > 0) {
             await upsertVectors(collectionName, points);
         }
