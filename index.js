@@ -1,4 +1,3 @@
-```javascript
 /**
  * RagForDummies - A RAG extension for SillyTavern that actually works
  * Supports group chats with Qdrant vector storage
@@ -2411,4 +2410,3 @@ jQuery(async function() {
         await init();
     }, 100);
 });
-```
