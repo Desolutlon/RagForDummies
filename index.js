@@ -58,7 +58,8 @@ const defaultSettings = {
     autoIndex: true,
     injectContext: true,
     injectionPosition: 'after_main', // 'before_main', 'after_main', 'after_messages'
-    injectAfterMessages: 3 // If injectionPosition is 'after_messages', inject after this many messages from end
+    injectAfterMessages: 3, // If injectionPosition is 'after_messages', inject after this many messages from end
+    excludeLastMessages: 2 // Number of recent messages to exclude from search results to prevent redundancy
 };
 
 let extensionSettings = { ...defaultSettings };
@@ -498,48 +499,54 @@ async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
 
 /**
  * Hybrid search: combines filtered (term-gated) search with dense search
- * New behavior: always reserve ~50% for dense (unless filtered returns < half, then dense fills).
+ * UPDATED: Added maxIndex to prevent retrieving the immediate chat history (redundancy fix)
  */
-/**
- * Hybrid search: combines filtered (term-gated) search with dense search
- * New behavior: always reserve ~50% for dense (unless filtered returns < half, then dense fills).
- */
-async function searchVectors(collectionName, vector, limit, scoreThreshold, properNouns) {
+async function searchVectors(collectionName, vector, limit, scoreThreshold, properNouns, maxIndex) {
     if (limit === undefined || limit === null) limit = extensionSettings.retrievalCount || 5;
     if (scoreThreshold === undefined) scoreThreshold = extensionSettings.similarityThreshold || 0.7;
     if (properNouns === undefined) properNouns = [];
+    // Default to a very high number if not provided, essentially disabling the limit
+    if (maxIndex === undefined || maxIndex === null) maxIndex = 999999999;
 
     // Quota: reserve ~50% dense minimum
     const denseTarget = Math.max(1, Math.ceil(limit / 2));
     const filteredTarget = limit - denseTarget;
 
-    // Oversample to survive dedupe + later filtering (characters_present happens outside this function)
+    // Oversample to survive dedupe + later filtering
     const denseFetch = Math.max(limit * 2, denseTarget * 4);
     const filteredFetch = Math.max(limit * 2, filteredTarget * 4);
 
     try {
         console.log('[' + MODULE_NAME + '] ===== HYBRID SEARCH =====');
         console.log('[' + MODULE_NAME + '] Collection: ' + collectionName);
-        console.log('[' + MODULE_NAME + '] Parameters: limit=' + limit + ', threshold=' + scoreThreshold);
-        console.log('[' + MODULE_NAME + '] Quotas: denseTarget=' + denseTarget + ', filteredTarget=' + filteredTarget);
-        console.log('[' + MODULE_NAME + '] Proper nouns for filtering: ' + (properNouns.length > 0 ? properNouns.join(', ') : '(none)'));
+        console.log('[' + MODULE_NAME + '] Ignoring messages with index >= ' + maxIndex);
+        console.log('[' + MODULE_NAME + '] Proper nouns: ' + (properNouns.length > 0 ? properNouns.join(', ') : '(none)'));
 
-        let filteredResults = [];
-        let denseResults = [];
+        // Base filter: always exclude future/current messages
+        const rangeFilter = {
+            key: 'message_index',
+            range: { lt: maxIndex }
+        };
 
-        // Fire both searches (filtered only if we have terms)
+        // --- DENSE SEARCH ---
+        const denseFilter = {
+            must: [ rangeFilter ]
+        };
+
         const densePromise = qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
             vector: vector,
             limit: denseFetch,
             score_threshold: scoreThreshold,
-            with_payload: true
+            with_payload: true,
+            filter: denseFilter
         });
 
+        // --- FILTERED SEARCH ---
         let filteredPromise = Promise.resolve({ result: [] });
         if (properNouns.length > 0 && filteredTarget > 0) {
-            // UPDATED: Use Qdrant 'any' match for keyword fields
-            const filter = {
+            const keywordFilter = {
                 must: [
+                    rangeFilter,
                     {
                         key: 'proper_nouns',
                         match: { any: properNouns }
@@ -552,16 +559,17 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
                 limit: filteredFetch,
                 score_threshold: scoreThreshold,
                 with_payload: true,
-                filter: filter
+                filter: keywordFilter
             });
         }
 
         const [denseResp, filteredResp] = await Promise.all([densePromise, filteredPromise]);
 
-        denseResults = (denseResp && denseResp.result) ? denseResp.result : [];
+        let denseResults = (denseResp && denseResp.result) ? denseResp.result : [];
         const rawFiltered = (filteredResp && filteredResp.result) ? filteredResp.result : [];
 
-        // Validate filtered results actually contain matched nouns
+        // Validate filtered results
+        let filteredResults = [];
         if (rawFiltered.length > 0) {
             filteredResults = rawFiltered.filter(function(r) {
                 const resultNouns = (r.payload && r.payload.proper_nouns) ? r.payload.proper_nouns : [];
@@ -570,29 +578,23 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
                 });
             });
 
-            // === NEW LOGGING: Show exactly what matched ===
+            // LOGGING
             console.log('[' + MODULE_NAME + '] --- Filtered Matches Detail ---');
             filteredResults.forEach(function(r) {
                 const resultNouns = (r.payload && r.payload.proper_nouns) ? r.payload.proper_nouns : [];
-                // Calculate intersection to see what triggered the match
-                const matchedTerms = resultNouns.filter(function(n) {
-                    return properNouns.indexOf(n) !== -1;
-                });
-                const msgSnippet = (r.payload.full_message || '').substring(0, 60).replace(/\n/g, ' ');
-                console.log('[' + MODULE_NAME + '] Match (Score: ' + r.score.toFixed(3) + ') | Terms: [' + matchedTerms.join(', ') + '] | Msg: "' + msgSnippet + '..."');
+                const matchedTerms = resultNouns.filter(n => properNouns.indexOf(n) !== -1);
+                const idx = r.payload.message_index;
+                const msgSnippet = (r.payload.full_message || '').substring(0, 50).replace(/\n/g, ' ');
+                console.log(`[${MODULE_NAME}] Match (Idx: ${idx}, Score: ${r.score.toFixed(3)}) | Terms: [${matchedTerms.join(', ')}] | "${msgSnippet}..."`);
             });
             console.log('[' + MODULE_NAME + '] -----------------------------');
-            // ==============================================
         }
 
-        console.log('[' + MODULE_NAME + '] Dense returned: ' + denseResults.length);
-        console.log('[' + MODULE_NAME + '] Filtered raw: ' + rawFiltered.length + ' | validated: ' + filteredResults.length);
-
-        // De-dupe while selecting with quotas
+        // De-dupe and quota logic
         const seenIds = new Set();
         const finalResults = [];
 
-        // Take up to filteredTarget from filtered first
+        // 1. Fill from Filtered
         for (const r of filteredResults) {
             if (finalResults.length >= filteredTarget) break;
             if (seenIds.has(r.id)) continue;
@@ -601,7 +603,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
             seenIds.add(r.id);
         }
 
-        // Then take up to limit from dense
+        // 2. Fill from Dense
         for (const r of denseResults) {
             if (finalResults.length >= limit) break;
             if (seenIds.has(r.id)) continue;
@@ -610,8 +612,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
             seenIds.add(r.id);
         }
 
-        // If filteredTarget was not met (e.g., no terms, few matches), we already filled from dense.
-        // If dense was weak and filtered has more good results, backfill from filtered to reach limit.
+        // 3. Backfill from Filtered if needed
         if (finalResults.length < limit) {
             for (const r of filteredResults) {
                 if (finalResults.length >= limit) break;
@@ -622,13 +623,11 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
             }
         }
 
-        // Optional: sort final by score for nicer ordering in logs/context
-        finalResults.sort(function(a, b) { return b.score - a.score; });
+        finalResults.sort((a, b) => b.score - a.score);
 
-        console.log('[' + MODULE_NAME + '] ===== HYBRID SEARCH COMPLETE =====');
-        console.log('[' + MODULE_NAME + '] Final results: ' + finalResults.length + ' (filtered: ' +
-            finalResults.filter(function(r) { return r._source === 'filtered'; }).length +
-            ', dense: ' + finalResults.filter(function(r) { return r._source === 'dense'; }).length + ')');
+        console.log('[' + MODULE_NAME + '] Final results: ' + finalResults.length + 
+            ' (filtered: ' + finalResults.filter(r => r._source === 'filtered').length + 
+            ', dense: ' + finalResults.filter(r => r._source === 'dense').length + ')');
 
         return finalResults;
     } catch (error) {
@@ -1119,6 +1118,21 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
         const prefix = isGroupChat ? 'st_groupchat_' : 'st_chat_';
         const collectionName = prefix + chatIdHash;
         
+        // Determine the cutoff index to avoid redundant "current context"
+        let maxIndex = 999999999;
+        let context = null;
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            context = SillyTavern.getContext();
+        } else if (typeof getContext === 'function') {
+            context = getContext();
+        }
+        
+        if (context && context.chat) {
+            // Exclude based on user setting (default 2)
+            const excludeCount = extensionSettings.excludeLastMessages !== undefined ? extensionSettings.excludeLastMessages : 2;
+            maxIndex = Math.max(0, context.chat.length - excludeCount);
+        }
+
         // Get participant names to exclude from query filter terms
         const participantNames = getParticipantNames(null);
         
@@ -1133,7 +1147,8 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
             queryEmbedding,
             extensionSettings.retrievalCount,
             extensionSettings.similarityThreshold,
-            queryFilterTerms
+            queryFilterTerms,
+            maxIndex
         );
         
         if (results.length === 0) {
@@ -1839,6 +1854,12 @@ function createSettingsUI() {
                             '<input type="number" id="ragfordummies_similarity_threshold" value="' + extensionSettings.similarityThreshold + '" min="0" max="1" step="0.1" />' +
                         '</label>' +
                         
+                        '<label>' +
+                            '<span>Exclude Recent Messages:</span>' +
+                            '<input type="number" id="ragfordummies_exclude_last_messages" value="' + (extensionSettings.excludeLastMessages !== undefined ? extensionSettings.excludeLastMessages : 2) + '" min="0" max="10" />' +
+                            '<small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small>' +
+                        '</label>' +
+                        
                         '<label class="checkbox_label">' +
                             '<input type="checkbox" id="ragfordummies_auto_index" ' + (extensionSettings.autoIndex ? 'checked' : '') + ' />' +
                             'Auto-index on first message' +
@@ -1909,7 +1930,8 @@ function attachEventListeners() {
         'enabled', 'qdrant_local_url',
         'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
         'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold',
-        'auto_index', 'inject_context', 'injection_position', 'inject_after_messages'
+        'auto_index', 'inject_context', 'injection_position', 'inject_after_messages',
+        'exclude_last_messages'
     ];
     
     settingIds.forEach(function(id) {
