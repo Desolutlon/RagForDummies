@@ -515,133 +515,123 @@ async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
 }
 
 /**
- * Hybrid search: combines filtered (proper noun) search with dense search
+ * Hybrid search: combines filtered (term-gated) search with dense search
+ * New behavior: always reserve ~50% for dense (unless filtered returns < half, then dense fills).
  */
 async function searchVectors(collectionName, vector, limit, scoreThreshold, properNouns) {
     if (limit === undefined || limit === null) limit = extensionSettings.retrievalCount || 5;
     if (scoreThreshold === undefined) scoreThreshold = extensionSettings.similarityThreshold || 0.7;
     if (properNouns === undefined) properNouns = [];
-    const requiredFiltered = extensionSettings.retrievalCount || limit;
-    
+
+    // Quota: reserve ~50% dense minimum
+    const denseTarget = Math.max(1, Math.ceil(limit / 2));
+    const filteredTarget = limit - denseTarget;
+
+    // Oversample to survive dedupe + later filtering (characters_present happens outside this function)
+    const denseFetch = Math.max(limit * 2, denseTarget * 4);
+    const filteredFetch = Math.max(limit * 2, filteredTarget * 4);
+
     try {
         console.log('[' + MODULE_NAME + '] ===== HYBRID SEARCH =====');
         console.log('[' + MODULE_NAME + '] Collection: ' + collectionName);
-        console.log('[' + MODULE_NAME + '] Parameters: limit=' + limit + ', threshold=' + scoreThreshold + ', requiredFiltered=' + requiredFiltered);
-        console.log('[' + MODULE_NAME + '] Query vector dimensions: ' + vector.length);
+        console.log('[' + MODULE_NAME + '] Parameters: limit=' + limit + ', threshold=' + scoreThreshold);
+        console.log('[' + MODULE_NAME + '] Quotas: denseTarget=' + denseTarget + ', filteredTarget=' + filteredTarget);
         console.log('[' + MODULE_NAME + '] Proper nouns for filtering: ' + (properNouns.length > 0 ? properNouns.join(', ') : '(none)'));
-        
+
         let filteredResults = [];
         let denseResults = [];
-        
-        if (properNouns.length > 0) {
-            console.log('[' + MODULE_NAME + '] Run 1: Filtered search with ' + properNouns.length + ' proper nouns...');
+
+        // Fire both searches (filtered only if we have terms)
+        const densePromise = qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
+            vector: vector,
+            limit: denseFetch,
+            score_threshold: scoreThreshold,
+            with_payload: true
+        });
+
+        let filteredPromise = Promise.resolve({ result: [] });
+        if (properNouns.length > 0 && filteredTarget > 0) {
             const filter = {
                 should: properNouns.map(function(noun) {
-                    return {
-                        key: 'proper_nouns',
-                        match: { value: noun }
-                    };
+                    return { key: 'proper_nouns', match: { value: noun } };
                 })
             };
-            
-            try {
-                const filteredResult = await qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
-                    vector: vector,
-                    limit: limit * 2,
-                    score_threshold: scoreThreshold,
-                    with_payload: true,
-                    filter: filter
-                });
-                
-                const rawResults = filteredResult.result || [];
-                console.log('[' + MODULE_NAME + '] Run 1 raw results: ' + rawResults.length);
-                
-                filteredResults = rawResults.filter(function(r) {
-                    const resultNouns = r.payload.proper_nouns || [];
-                    const hasMatch = resultNouns.some(function(noun) {
-                        return properNouns.indexOf(noun) !== -1;
-                    });
-                    if (!hasMatch) {
-                        console.log('[' + MODULE_NAME + '] Filtered out false positive: "' + (r.payload.full_message || '').substring(0, 50) + '..." (no matching nouns)');
-                    }
-                    return hasMatch;
-                });
-                
-                console.log('[' + MODULE_NAME + '] Run 1 validated results: ' + filteredResults.length);
-                
-                if (filteredResults.length > 0) {
-                    console.log('[' + MODULE_NAME + '] Filtered top score: ' + filteredResults[0].score.toFixed(3));
-                    filteredResults.forEach(function(r, idx) {
-                        const matchedNouns = (r.payload.proper_nouns || []).filter(function(n) {
-                            return properNouns.indexOf(n) !== -1;
-                        });
-                        console.log('[' + MODULE_NAME + ']   Result ' + idx + ' matched nouns: ' + matchedNouns.join(', '));
-                    });
-                }
-            } catch (filterError) {
-                console.warn('[' + MODULE_NAME + '] Filtered search failed, falling back to dense:', filterError.message);
-            }
-        }
-        
-        if (filteredResults.length < requiredFiltered) {
-            console.log('[' + MODULE_NAME + '] Run 2: Dense search (filtered returned ' + filteredResults.length + ' < ' + requiredFiltered + ')...');
-            
-            const denseResult = await qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
+
+            filteredPromise = qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
                 vector: vector,
-                limit: limit,
+                limit: filteredFetch,
                 score_threshold: scoreThreshold,
-                with_payload: true
+                with_payload: true,
+                filter: filter
             });
-            
-            denseResults = denseResult.result || [];
-            console.log('[' + MODULE_NAME + '] Run 2 returned ' + denseResults.length + ' dense results');
-            
-            if (denseResults.length > 0) {
-                console.log('[' + MODULE_NAME + '] Dense top score: ' + denseResults[0].score.toFixed(3));
-            }
-        } else {
-            console.log('[' + MODULE_NAME + '] Skipping dense: filtered returned sufficient results (' + filteredResults.length + ' >= ' + requiredFiltered + ')');
         }
-        
-        const combined = [];
+
+        const [denseResp, filteredResp] = await Promise.all([densePromise, filteredPromise]);
+
+        denseResults = (denseResp && denseResp.result) ? denseResp.result : [];
+        const rawFiltered = (filteredResp && filteredResp.result) ? filteredResp.result : [];
+
+        // Validate filtered results actually contain matched nouns (keeps your existing safety)
+        if (rawFiltered.length > 0) {
+            filteredResults = rawFiltered.filter(function(r) {
+                const resultNouns = (r.payload && r.payload.proper_nouns) ? r.payload.proper_nouns : [];
+                return resultNouns.some(function(noun) {
+                    return properNouns.indexOf(noun) !== -1;
+                });
+            });
+        }
+
+        console.log('[' + MODULE_NAME + '] Dense returned: ' + denseResults.length);
+        console.log('[' + MODULE_NAME + '] Filtered raw: ' + rawFiltered.length + ' | validated: ' + filteredResults.length);
+
+        // De-dupe while selecting with quotas
         const seenIds = new Set();
-        
-        filteredResults.forEach(function(r) {
-            if (!seenIds.has(r.id)) {
-                r._source = 'filtered';
-                combined.push(r);
-                seenIds.add(r.id);
-            }
-        });
-        
-        denseResults.forEach(function(r) {
-            if (!seenIds.has(r.id)) {
-                r._source = 'dense';
-                combined.push(r);
-                seenIds.add(r.id);
-            }
-        });
-        
-        combined.sort(function(a, b) { return b.score - a.score; });
-        const finalResults = combined.slice(0, limit);
-        
-        console.log('[' + MODULE_NAME + '] ===== HYBRID SEARCH COMPLETE =====');
-        console.log('[' + MODULE_NAME + '] Final results: ' + finalResults.length + ' (filtered: ' + 
-            finalResults.filter(function(r) { return r._source === 'filtered'; }).length + 
-            ', dense: ' + finalResults.filter(function(r) { return r._source === 'dense'; }).length + ')');
-        
-        if (finalResults.length > 0) {
-            console.log('[' + MODULE_NAME + '] Score range: ' + finalResults[0].score.toFixed(3) + ' - ' + 
-                finalResults[finalResults.length - 1].score.toFixed(3));
+        const finalResults = [];
+
+        // Take up to filteredTarget from filtered first
+        for (const r of filteredResults) {
+            if (finalResults.length >= filteredTarget) break;
+            if (seenIds.has(r.id)) continue;
+            r._source = 'filtered';
+            finalResults.push(r);
+            seenIds.add(r.id);
         }
-        
+
+        // Then take up to limit from dense
+        for (const r of denseResults) {
+            if (finalResults.length >= limit) break;
+            if (seenIds.has(r.id)) continue;
+            r._source = 'dense';
+            finalResults.push(r);
+            seenIds.add(r.id);
+        }
+
+        // If filteredTarget was not met (e.g., no terms, few matches), we already filled from dense.
+        // If dense was weak and filtered has more good results, backfill from filtered to reach limit.
+        if (finalResults.length < limit) {
+            for (const r of filteredResults) {
+                if (finalResults.length >= limit) break;
+                if (seenIds.has(r.id)) continue;
+                r._source = 'filtered';
+                finalResults.push(r);
+                seenIds.add(r.id);
+            }
+        }
+
+        // Optional: sort final by score for nicer ordering in logs/context
+        finalResults.sort(function(a, b) { return b.score - a.score; });
+
+        console.log('[' + MODULE_NAME + '] ===== HYBRID SEARCH COMPLETE =====');
+        console.log('[' + MODULE_NAME + '] Final results: ' + finalResults.length + ' (filtered: ' +
+            finalResults.filter(function(r) { return r._source === 'filtered'; }).length +
+            ', dense: ' + finalResults.filter(function(r) { return r._source === 'dense'; }).length + ')');
+
         return finalResults;
     } catch (error) {
         console.error('[' + MODULE_NAME + '] Hybrid search failed:', error);
         return [];
     }
 }
-
 async function getCollectionInfo(collectionName) {
     try {
         const result = await qdrantRequest('/collections/' + collectionName);
