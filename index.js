@@ -1954,7 +1954,7 @@ function attachEventListeners() {
                         }
                     }
                 } else if (element.type === 'number') {
-                    extensionSettings[key] = parseFloat(element.value);
+                    extensionSettings[key] = parseFloat(element.value) || 0;
                 } else {
                     extensionSettings[key] = element.value;
                 }
