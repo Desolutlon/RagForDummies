@@ -293,59 +293,41 @@ function extractProperNouns(text, excludeNames) {
 }
 
 /**
- * Extract potential filter terms from a QUERY (more lenient than extractProperNouns)
- * This extracts ALL significant words regardless of capitalization
- * Used for hybrid search to find messages that contain these terms in their proper_nouns field
+ * Extract potential filter terms from a QUERY (UPDATED to use raw text)
+ * This is more lenient: it strips asterisks/ellipses/punctuation but uses the raw user text
+ * allowing "any" matching in Qdrant.
  * @param {string} text - The query text
  * @param {Set<string>} excludeNames - Optional set of names to exclude (participant names)
- * @returns {string[]} - Array of potential filter terms (lowercase)
+ * @returns {string[]} - Array of terms (lowercase)
  */
 function extractQueryFilterTerms(text, excludeNames) {
     if (excludeNames === undefined) excludeNames = new Set();
     if (!text || typeof text !== 'string') return [];
     
     const terms = new Set();
+
+    // 1. Clean the text:
+    // - Replace multiple asterisks with space (removes action markers but keeps text if desired, or effectively separates words)
+    // - Replace ellipses (...) with space
+    // - Replace quotes with space
+    // - Keep letters, numbers, and spaces
     
-    const stopWords = new Set([
-        'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
-        'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs',
-        'this', 'that', 'these', 'those', 'what', 'which', 'who', 'whom', 'whose',
-        'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'why', 'how',
-        'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'into', 'onto', 'upon', 'about',
-        'over', 'under', 'through', 'between', 'among', 'all', 'each', 'every', 'both', 'few',
-        'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
-        'than', 'too', 'very', 'just', 'also', 'now', 'here', 'there', 'always', 'never',
-        'sometimes', 'often', 'usually', 'as', 'up', 'down', 'out', 'off', 'away',
-        'im', 'ive', 'id', 'ill', 'youre', 'youve', 'youd', 'youll', 'hes', 'shes', 'weve',
-        'were', 'wed', 'well', 'theyve', 'theyre', 'theyd', 'theyll', 'isnt', 'arent', 'wasnt',
-        'werent', 'dont', 'doesnt', 'didnt', 'wont', 'wouldnt', 'couldnt', 'shouldnt', 'cant',
-        'cannot', 'hadnt', 'hasnt', 'havent', 'lets', 'thats', 'whats', 'whos', 'hows',
-        'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having',
-        'do', 'does', 'did', 'doing', 'will', 'would', 'could', 'should', 'may', 'might',
-        'must', 'shall', 'can', 'say', 'said', 'says', 'see', 'saw', 'seen', 'get', 'got',
-        'go', 'went', 'gone', 'come', 'came', 'know', 'knew', 'think', 'thought', 'make',
-        'made', 'take', 'took', 'want', 'wanted', 'look', 'looked', 'give', 'gave', 'use',
-        'used', 'find', 'found', 'tell', 'told', 'let', 'put', 'keep', 'kept', 'leave', 'left',
-        'good', 'bad', 'great', 'big', 'small', 'old', 'new', 'first', 'last', 'long', 'little',
-        'really', 'actually', 'probably', 'maybe', 'perhaps', 'definitely', 'certainly',
-        'oh', 'ah', 'um', 'uh', 'hey', 'hi', 'hello', 'bye', 'yes', 'no', 'yeah', 'yea', 'yep',
-        'nope', 'okay', 'ok', 'well', 'like', 'huh', 'hmm', 'wow', 'whoa',
-        'today', 'tomorrow', 'yesterday', 'morning', 'afternoon', 'evening', 'night',
-        'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
-        'something', 'nothing', 'everything', 'anything', 'someone', 'anyone', 'everyone',
-        'much', 'many', 'lot', 'lots', 'bit', 'kind', 'sort', 'type', 'way', 'thing', 'things'
-    ]);
+    let cleaned = text.replace(/\*+/g, ' ')       // Remove asterisks
+                      .replace(/\.{2,}/g, ' ')    // Remove ellipses
+                      .replace(/["']/g, ' ');     // Remove quotes
     
-    const words = text.toLowerCase().split(/\s+/);
+    // 2. Split into words based on non-alphanumeric characters
+    const words = cleaned.toLowerCase().split(/[^a-z0-9]+/);
     
     for (const word of words) {
-        const cleaned = word.replace(/^[^a-z]+|[^a-z]+$/g, '');
-        if (cleaned.length < 3) continue;
-        if (cleaned.length > 20) continue;
-        if (stopWords.has(cleaned)) continue;
+        // Basic filtering to avoid junk
+        if (word.length < 2) continue;  // Skip single letters
+        if (word.length > 30) continue; // Skip overly long strings
+        
         // Skip participant names (user, character names)
-        if (excludeNames.has(cleaned)) continue;
-        terms.add(cleaned);
+        if (excludeNames.has(word)) continue;
+        
+        terms.add(word);
     }
     
     return Array.from(terms);
@@ -551,10 +533,14 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
 
         let filteredPromise = Promise.resolve({ result: [] });
         if (properNouns.length > 0 && filteredTarget > 0) {
+            // UPDATED: Use Qdrant 'any' match for keyword fields instead of 'should' loop
             const filter = {
-                should: properNouns.map(function(noun) {
-                    return { key: 'proper_nouns', match: { value: noun } };
-                })
+                must: [
+                    {
+                        key: 'proper_nouns',
+                        match: { any: properNouns }
+                    }
+                ]
             };
 
             filteredPromise = qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
@@ -2122,12 +2108,12 @@ function attachEventListeners() {
                     log('RUN 1: Filtered search (term matching)...');
                     
                     const filter = {
-                        should: filterTerms.map(function(term) {
-                            return {
+                        must: [
+                            {
                                 key: 'proper_nouns',
-                                match: { value: term }
-                            };
-                        })
+                                match: { any: filterTerms }
+                            }
+                        ]
                     };
                     
                     try {
