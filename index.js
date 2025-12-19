@@ -500,6 +500,10 @@ async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
  * Hybrid search: combines filtered (term-gated) search with dense search
  * New behavior: always reserve ~50% for dense (unless filtered returns < half, then dense fills).
  */
+/**
+ * Hybrid search: combines filtered (term-gated) search with dense search
+ * New behavior: always reserve ~50% for dense (unless filtered returns < half, then dense fills).
+ */
 async function searchVectors(collectionName, vector, limit, scoreThreshold, properNouns) {
     if (limit === undefined || limit === null) limit = extensionSettings.retrievalCount || 5;
     if (scoreThreshold === undefined) scoreThreshold = extensionSettings.similarityThreshold || 0.7;
@@ -533,7 +537,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
 
         let filteredPromise = Promise.resolve({ result: [] });
         if (properNouns.length > 0 && filteredTarget > 0) {
-            // UPDATED: Use Qdrant 'any' match for keyword fields instead of 'should' loop
+            // UPDATED: Use Qdrant 'any' match for keyword fields
             const filter = {
                 must: [
                     {
@@ -557,7 +561,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
         denseResults = (denseResp && denseResp.result) ? denseResp.result : [];
         const rawFiltered = (filteredResp && filteredResp.result) ? filteredResp.result : [];
 
-        // Validate filtered results actually contain matched nouns (keeps your existing safety)
+        // Validate filtered results actually contain matched nouns
         if (rawFiltered.length > 0) {
             filteredResults = rawFiltered.filter(function(r) {
                 const resultNouns = (r.payload && r.payload.proper_nouns) ? r.payload.proper_nouns : [];
@@ -565,6 +569,20 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
                     return properNouns.indexOf(noun) !== -1;
                 });
             });
+
+            // === NEW LOGGING: Show exactly what matched ===
+            console.log('[' + MODULE_NAME + '] --- Filtered Matches Detail ---');
+            filteredResults.forEach(function(r) {
+                const resultNouns = (r.payload && r.payload.proper_nouns) ? r.payload.proper_nouns : [];
+                // Calculate intersection to see what triggered the match
+                const matchedTerms = resultNouns.filter(function(n) {
+                    return properNouns.indexOf(n) !== -1;
+                });
+                const msgSnippet = (r.payload.full_message || '').substring(0, 60).replace(/\n/g, ' ');
+                console.log('[' + MODULE_NAME + '] Match (Score: ' + r.score.toFixed(3) + ') | Terms: [' + matchedTerms.join(', ') + '] | Msg: "' + msgSnippet + '..."');
+            });
+            console.log('[' + MODULE_NAME + '] -----------------------------');
+            // ==============================================
         }
 
         console.log('[' + MODULE_NAME + '] Dense returned: ' + denseResults.length);
