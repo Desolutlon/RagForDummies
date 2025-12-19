@@ -1120,7 +1120,9 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
         
         // Determine the cutoff index to avoid redundant "current context"
         let maxIndex = 999999999;
-        let context = null;
+        let context = null; // Variable is declared here
+        
+        // CORRECTED: Assign to the existing variable, don't re-declare with 'let'
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
             context = SillyTavern.getContext();
         } else if (typeof getContext === 'function') {
@@ -1207,18 +1209,17 @@ async function retrieveContext(query, chatIdHash, isGroupChat) {
             return text;
         });
         
-        const context = '\n\n========== RELEVANT PAST CONTEXT FROM RAG ==========\n' + 
+        const contextString = '\n\n========== RELEVANT PAST CONTEXT FROM RAG ==========\n' + 
                        contextParts.join('\n\n-------------------\n') + 
                        '\n\n========== END RAG CONTEXT ==========\n\n';
         
-        console.log('[' + MODULE_NAME + '] Formatted context with full metadata (' + context.length + ' chars)');
-        return context;
+        console.log('[' + MODULE_NAME + '] Formatted context with full metadata (' + contextString.length + ' chars)');
+        return contextString;
     } catch (error) {
         console.error('[' + MODULE_NAME + '] Context retrieval failed:', error);
         return '';
     }
 }
-
 // ===========================
 // SillyTavern Integration
 // ===========================
