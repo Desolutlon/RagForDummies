@@ -849,6 +849,16 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     } else if (tracker.CharactersPresent && Array.isArray(tracker.CharactersPresent)) {
         charactersPresent = tracker.CharactersPresent;
     }
+
+    // UPDATED: Ensure the speaker is considered "present"
+    // If the message is from a character (not user), they must be present.
+    // This fixes issues where SillyTavern metadata is incomplete or in 1-on-1s.
+    if (message.name && message.name !== 'User') {
+        const alreadyListed = charactersPresent.some(cp => String(cp).toLowerCase() === String(message.name).toLowerCase());
+        if (!alreadyListed) {
+            charactersPresent.push(message.name);
+        }
+    }
     
     const messageProperNouns = extractProperNouns(message.mes || '', participantNames);
     
