@@ -141,7 +141,7 @@ const keywordBlacklist = new Set([
     'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays',
     'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers',
     'don', 'wasn', 'weren', 'isn', 'aren', 'didn', 'doesn', 'hasn', 'hadn', 'haven', 'wouldn', 'shouldn', 'couldn', 'mustn', 'shan', 'won', 've', 're', 'll', 's', 'm', 'd', 't',
-    'leg', 'legs', 'babe', 'baby', 'darling', 'honey', 'sweetheart', 'dear', 'love'
+    'leg', 'legs', 'babe', 'baby', 'darling', 'honey', 'sweetheart', 'dear', 'love', 'oof', 'mmph'
 ]);
 
 // Helper function to get user-defined blacklist as a Set
