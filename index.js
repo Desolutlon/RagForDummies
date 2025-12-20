@@ -59,6 +59,7 @@ const defaultSettings = {
     retrievalCount: 5,
     similarityThreshold: 0.7,
     maxTokenBudget: 1000, // Token Budget Setting
+    queryMessageCount: 3, // How many messages to use for the query context
     autoIndex: true,
     injectContext: true,
     injectionPosition: 'after_main',
@@ -760,6 +761,73 @@ function getQueryMessage(context, idxOverride, generationType) {
     return lastMsg;
 }
 
+/**
+ * NEW FUNCTION: Constructs a query string from multiple messages.
+ * Respects group chat presence logic (The "Melissa Check").
+ */
+function constructMultiMessageQuery(context, generationType) {
+    // 1. Get the "Anchor" message (the most recent relevant one) using existing logic
+    const anchorMsg = getQueryMessage(context, null, generationType);
+    if (!anchorMsg) return "";
+
+    // If we only want 1, just return that (keeps legacy behavior 100% safe)
+    const count = extensionSettings.queryMessageCount || 1;
+    if (count <= 1) return anchorMsg.mes;
+
+    // 2. Find where this anchor is in the array
+    const chat = context.chat;
+    const anchorIdx = chat.lastIndexOf(anchorMsg);
+    if (anchorIdx === -1) return anchorMsg.mes;
+
+    // 3. Identify who is "listening" (The Active Character)
+    const activeChar = getActiveCharacterName();
+    const isGroup = isCurrentChatGroupChat();
+    const collectedText = [];
+
+    // 4. Walk backwards from the anchor
+    let messagesFound = 0;
+    let currentIdx = anchorIdx;
+
+    while (messagesFound < count && currentIdx >= 0) {
+        const msg = chat[currentIdx];
+        
+        // Skip system messages
+        if (msg.is_system) {
+            currentIdx--;
+            continue;
+        }
+
+        let isVisible = true;
+
+        // GROUP CHAT VISIBILITY LOGIC ("The Melissa Check")
+        if (isGroup && activeChar) {
+            // If the active char SENT the message, they obviously know about it
+            const isSender = (msg.name === activeChar);
+            
+            // Check presence list
+            const presentList = (msg.present || msg.characters_present || []).map(n => String(n).toLowerCase());
+            const isPresent = presentList.includes(activeChar.toLowerCase());
+
+            // Logic: If I didn't send it, and I wasn't in the presence list... I didn't hear it.
+            // Note: If presentList is empty, ST often implies "everyone present", so we default to true.
+            if (!isSender && presentList.length > 0 && !isPresent) {
+                isVisible = false;
+                console.log(`[${MODULE_NAME}] Query Build: Skipping msg #${currentIdx} ("${msg.mes.substring(0,20)}...") - ${activeChar} was not present.`);
+            }
+        }
+
+        if (isVisible && msg.mes) {
+            collectedText.unshift(msg.mes);
+            messagesFound++;
+        }
+
+        currentIdx--;
+    }
+
+    // Join with newlines to create a "Block" of conversation for the vector embedding
+    return collectedText.join('\n');
+}
+
 async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
     if (isIndexing) {
         console.log('[' + MODULE_NAME + '] Already indexing, please wait...');
@@ -1241,10 +1309,16 @@ async function injectContextWithSetExtensionPrompt(generationType) {
     if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
     else if (typeof getContext === 'function') context = getContext();
     if (!context?.chat?.length || !context.setExtensionPrompt) return;
-    const lastMessage = getQueryMessage(context, null, generationType);
-    if (!lastMessage?.mes) return;
-    const retrievedContext = await retrieveContext(lastMessage.mes.substring(0, 1000), chatId, isCurrentChatGroupChat());
+    
+    // NEW QUERY CONSTRUCTION
+    const queryText = constructMultiMessageQuery(context, generationType);
+    if (!queryText) return;
+    
+    console.log('[' + MODULE_NAME + '] Generating query embedding for text: "' + queryText.substring(0, 100).replace(/\n/g, ' ') + '..."');
+    
+    const retrievedContext = await retrieveContext(queryText.substring(0, 2000), chatId, isCurrentChatGroupChat());
     if (!retrievedContext) return;
+    
     let position = 1, depth = 4;
     if (extensionSettings.injectionPosition === 'before_main') { position = 0; depth = 0; }
     else if (extensionSettings.injectionPosition === 'after_main') { position = 1; depth = 0; }
@@ -1269,10 +1343,15 @@ async function injectContextBeforeGeneration(data) {
     if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
     else if (typeof getContext === 'function') context = getContext();
     if (!context?.chat?.length) return;
-    const lastMessage = getQueryMessage(context, null, 'normal');
-    if (!lastMessage?.mes) return;
-    const retrievedContext = await retrieveContext(lastMessage.mes.substring(0, 1000), chatId, isCurrentChatGroupChat());
+    
+    // NEW QUERY CONSTRUCTION
+    // Note: data is the raw request, but we need the context for history lookup
+    const queryText = constructMultiMessageQuery(context, 'normal');
+    if (!queryText) return;
+
+    const retrievedContext = await retrieveContext(queryText.substring(0, 2000), chatId, isCurrentChatGroupChat());
     if (!retrievedContext) return;
+    
     const ragMessage = { role: 'system', content: '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]' };
     let insertIndex = 0;
     if (extensionSettings.injectionPosition === 'before_main') insertIndex = 0;
@@ -1317,7 +1396,7 @@ function createSettingsUI() {
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
                     <div class="ragfordummies-section"><h4>Qdrant Configuration</h4><label><span>Local URL:</span><input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" placeholder="http://localhost:6333" /></label></div>
                     <div class="ragfordummies-section"><h4>Embedding Provider</h4><label><span>Provider:</span><select id="ragfordummies_embedding_provider"><option value="kobold" ${extensionSettings.embeddingProvider === 'kobold' ? 'selected' : ''}>KoboldCpp</option><option value="ollama" ${extensionSettings.embeddingProvider === 'ollama' ? 'selected' : ''}>Ollama</option><option value="openai" ${extensionSettings.embeddingProvider === 'openai' ? 'selected' : ''}>OpenAI</option></select></label><label id="ragfordummies_kobold_settings" style="${extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none'}"><span>KoboldCpp URL:</span><input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" placeholder="http://localhost:11434" /></label><div id="ragfordummies_ollama_settings" style="${extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none'}"><label><span>Ollama URL:</span><input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" placeholder="http://localhost:11434" /></label><label><span>Ollama Model:</span><input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" placeholder="nomic-embed-text" /></label></div><div id="ragfordummies_openai_settings" style="${extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none'}"><label><span>OpenAI API Key:</span><input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" placeholder="sk-..." /></label><label><span>OpenAI Model:</span><input type="text" id="ragfordummies_openai_model" value="${extensionSettings.openaiModel}" placeholder="text-embedding-3-small" /></label></div></div>
-                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /><small style="opacity:0.7; display:block; margin-top:5px;">Budget for injected context. Lower budget = less context injected (least relevant information will be thrown away)</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
+                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Query Context Messages:</span><input type="number" id="ragfordummies_query_message_count" value="${extensionSettings.queryMessageCount}" min="1" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">How many recent messages to combine for the search query. Higher = better topic understanding.</small></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /><small style="opacity:0.7; display:block; margin-top:5px;">Budget for injected context. Lower budget = less context injected (least relevant information will be thrown away)</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
                     <div class="ragfordummies-section"><h4>Custom Keyword Blacklist</h4><label><span>Blacklisted Terms (comma-separated):</span><input type="text" id="ragfordummies_user_blacklist" value="${extensionSettings.userBlacklist || ''}" placeholder="baka, sweetheart, darling" /></label><small style="opacity:0.7; display:block; margin-top:5px;">Can be useful for things like pet names between you and your character appearing in the hybrid search. (Most likely not needed, as vector scoring takes care of this.) Do not touch unless you know what you're doing.</small></div>
                     <div class="ragfordummies-section"><h4>Context Injection Position</h4><label><span>Injection Position:</span><select id="ragfordummies_injection_position"><option value="before_main" ${extensionSettings.injectionPosition === 'before_main' ? 'selected' : ''}>Before Main Prompt</option><option value="after_main" ${extensionSettings.injectionPosition === 'after_main' ? 'selected' : ''}>After Main Prompt</option><option value="after_messages" ${extensionSettings.injectionPosition === 'after_messages' ? 'selected' : ''}>After X Messages</option></select></label><label id="ragfordummies_inject_after_messages_setting" style="${extensionSettings.injectionPosition === 'after_messages' ? '' : 'display:none'}"><span>Messages from End:</span><input type="number" id="ragfordummies_inject_after_messages" value="${extensionSettings.injectAfterMessages}" min="0" max="50" /><small style="opacity:0.7; display:block; margin-top:5px;">0 = at the very end, 3 = after last 3 messages</small></label></div>
                     <div class="ragfordummies-section"><h4>Manual Operations</h4><button id="ragfordummies_index_current" class="menu_button">Index Current Chat</button><button id="ragfordummies_force_reindex" class="menu_button">Force Re-index (Rebuild)</button><button id="ragfordummies_stop_indexing" class="menu_button ragfordummies-stop-btn">Stop Indexing</button><hr style="border-color: var(--SmartThemeBorderColor); margin: 10px 0;" /><label class="checkbox_label" style="margin-bottom: 8px;"><input type="checkbox" id="ragfordummies_merge_uploads" checked /><span>Merge uploads into current chat collection</span></label><button id="ragfordummies_upload_btn" class="menu_button">Upload File (JSONL or txt)</button><input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" /><div id="ragfordummies_status" class="ragfordummies-status">Ready</div></div>
@@ -1329,7 +1408,7 @@ function createSettingsUI() {
 function attachEventListeners() {
     const settingIds = [
         'enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
-        'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'auto_index', 
+        'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index', 
         'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
         'max_token_budget'
     ];
@@ -1512,7 +1591,7 @@ async function init() {
             eventSourceToUse.on('generate_before_combine_prompts', () => injectContextWithSetExtensionPrompt('normal'));
         }
         eventsRegistered = true;
-        // usePolling = false; <-- Removed this to allow summary sync in background
+        // usePolling = false; <-- Removed to allow background summary polling
         console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
     } else {
         console.log('[' + MODULE_NAME + '] eventSource not available, using polling fallback');
@@ -1520,7 +1599,7 @@ async function init() {
         usePolling = true;
     }
 
-    // Always start polling if autoIndex is on (handles summary sync + fallback message checks)
+    // Always start polling if autoIndex is on
     if (extensionSettings.autoIndex) {
         await startPolling();
     }
