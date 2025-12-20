@@ -83,7 +83,6 @@ const INJECTION_DEBOUNCE_MS = 1000;
 
 // --- The One, Master Blacklist to Rule Them All ---
 const keywordBlacklist = new Set([
-    // Your Original List
     'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs',
     'this', 'that', 'these', 'those', 'what', 'which', 'who', 'whom', 'whose', 'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'why', 'how',
     'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'into', 'onto', 'upon', 'about', 'over', 'under', 'through', 'between', 'among', 'all', 'each', 'every',
@@ -128,13 +127,13 @@ const keywordBlacklist = new Set([
     'expression', 'face', 'eyes', 'head', 'body', 'arm', 'arms', 'hand', 'hands', 'finger', 'fingers', 'teasing', 'teased', 'smug', 'smugly',
     'playful', 'playfully', 'curious', 'curiously', 'nervous', 'nervously', 'soft', 'warm', 'cold', 'hot', 'light', 'dark', 'bright', 'quiet', 'loud', 'gentle',
     'rough', 'slight', 'slightly', 'brief', 'briefly', 'quick', 'slow', 'sudden', 'careful', 'carefully',
-    // fuck pronouns
     "we've", "you're", "he's", "she's", "it's", "they're",
-    'yourself', 'worry', 'mr', 'mrs', 'sir', 'maam',
-    // Swear words n shit bitch lol
-    'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'bitch', 'dumbass', 'motherfucker', 'fucker', 'cunt', 'shitter', 'bullshit', 'asshat', 'fuckface'
-    // fuck i hate spacing and you do too. 
-    'hmph', 'tonights', 'tomorrows', 'todays', 'tonight', 'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays'
+    'yourself', 'worry', 'mr', 'mrs', 'sir', 'maam', 'hmph',
+    'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'bitch', 'dumbass',
+    'motherfucker', 'fucker', 'cunt', 'shitter', 'bullshit', 'asshat', 'fuckface', 'bastard', 'dick', 'cock', 'pussy', 'slut', 'whore', 'asshole', 'arse', 'prick', 'twat',
+    'tonights', 'tomorrows', 'todays', 'tonight', 
+    'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays',
+    'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers'
 ]);
 
 // Helper function to get user-defined blacklist as a Set
