@@ -128,13 +128,13 @@ const keywordBlacklist = new Set([
     'expression', 'face', 'eyes', 'head', 'body', 'arm', 'arms', 'hand', 'hands', 'finger', 'fingers', 'teasing', 'teased', 'smug', 'smugly',
     'playful', 'playfully', 'curious', 'curiously', 'nervous', 'nervously', 'soft', 'warm', 'cold', 'hot', 'light', 'dark', 'bright', 'quiet', 'loud', 'gentle',
     'rough', 'slight', 'slightly', 'brief', 'briefly', 'quick', 'slow', 'sudden', 'careful', 'carefully',
-    // some pronouns ig
+    // fuck pronouns
     "we've", "you're", "he's", "she's", "it's", "they're",
     'yourself', 'worry', 'mr', 'mrs', 'sir', 'maam',
-    // Swear words n shit lol
-    'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'bitch', 'dumbass', 'fucker', 'cunt', 'motherfucker', 'shitter',
-    // more additions bc i hate spacing
-    'hmph', 'tonights', 'todays', 'tomorrows', 'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays'
+    // Swear words n shit bitch lol
+    'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'bitch', 'dumbass', 'motherfucker', 'fucker', 'cunt', 'shitter', 'bullshit', 'asshat', 'fuckface'
+    // fuck i hate spacing and you do too. 
+    'hmph', 'tonights', 'tomorrows', 'todays', 'tonight', 'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays'
 ]);
 
 // Helper function to get user-defined blacklist as a Set
@@ -153,6 +153,11 @@ function extractKeywords(text, excludeNames = new Set()) {
     if (typeof window.nlp === 'undefined' || !text) {
         return [];
     }
+
+    // --- RAG Pre-processing: Clean Separators and Formats ---
+    // Fixes "dream-me" -> "dream me", "Ngh—*Tre*!" -> "Ngh Tre "
+    // Replaces hyphens, em-dashes, en-dashes, underscores, and asterisks with space.
+    text = text.replace(/[-–—_*]+/g, ' ');
 
     const wordsInText = text.split(/\s+/).length;
 
@@ -198,7 +203,9 @@ function extractKeywords(text, excludeNames = new Set()) {
     const potentialSources = [...topics, ...quotes];
 
     for (const source of potentialSources) {
-        const words = source.split(/\s+/);
+        // Split by anything that isn't a letter or number.
+        // This ensures that if any punctuation remains, it splits the word rather than fusing it.
+        const words = source.split(/[^a-zA-Z0-9]+/);
         for (const word of words) {
             processTerm(word);
         }
@@ -215,9 +222,12 @@ function extractProperNouns(text, excludeNames) {
     const sentences = text.split(/[.!?*]+|["'"]\s*/);
     
     for (let i = 0; i < sentences.length; i++) {
-        const sentence = sentences[i].trim();
+        let sentence = sentences[i].trim();
         if (!sentence) continue;
         
+        // Clean separators in sentence before splitting
+        sentence = sentence.replace(/[-–—_*]+/g, ' ');
+
         const words = sentence.split(/\s+/);
         
         for (let j = 0; j < words.length; j++) {
