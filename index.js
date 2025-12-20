@@ -133,7 +133,7 @@ const keywordBlacklist = new Set([
     'motherfucker', 'fucker', 'cunt', 'shitter', 'bullshit', 'asshat', 'fuckface', 'bastard', 'dick', 'cock', 'pussy', 'slut', 'whore', 'asshole', 'arse', 'prick', 'twat',
     'tonights', 'tomorrows', 'todays', 'tonight', 
     'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays',
-    'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers', 'legs', 'leg'
+    'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers', 'leg', 'legs'
 ]);
 
 // Helper function to get user-defined blacklist as a Set
@@ -153,7 +153,15 @@ function extractKeywords(text, excludeNames = new Set()) {
         return [];
     }
 
-    // --- RAG Pre-processing: Clean Separators and Formats ---
+    // --- STEP 1: PRE-CLEAN NLP ---
+    // Run NLP on the raw text *before* stripping special chars.
+    // This allows Compromise to see contractions (like "don't") correctly because the apostrophe is intact.
+    let doc = window.nlp(text);
+    doc.match('#Contraction').remove();
+    doc.match('#Expression').remove();
+    text = doc.text();
+
+    // --- STEP 2: STRIP SPECIAL CHARS ---
     // Fixes "dream-me" -> "dream me", "Ngh—*Tre*!" -> "Ngh Tre "
     // Replaces hyphens, em-dashes, en-dashes, underscores, and asterisks with space.
     text = text.replace(/[-–—_*]+/g, ' ');
@@ -170,15 +178,13 @@ function extractKeywords(text, excludeNames = new Set()) {
     const limit = baseKeywords + additionalKeywords;
 
     const finalKeywords = new Set();
-    const doc = window.nlp(text);
-
-    // --- RAG Pre-processing: Clean Contractions and Expressions ---
-    // Remove interjections/expressions (e.g., "wow", "ouch", "oh")
+    
+    // --- STEP 3: POST-CLEAN NLP ---
+    // Re-run NLP on the now-cleaned text to build the proper Topics/Keywords list.
+    // We run the removal filters again just in case the special char stripping exposed new edge cases.
+    doc = window.nlp(text);
     doc.match('#Expression').remove();
-    // Remove contractions completely (e.g., "I'm", "would've", "can't")
-    // This prevents parts of contractions from being indexed.
     doc.match('#Contraction').remove();
-    // ---------------------------------------------------------------
 
     const processTerm = (term) => {
         const cleaned = term.toLowerCase().replace(/[^a-z]/g, "");
