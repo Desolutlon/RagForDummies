@@ -59,7 +59,7 @@ const defaultSettings = {
     retrievalCount: 5,
     similarityThreshold: 0.7,
     maxTokenBudget: 1000, // Token Budget Setting
-    queryMessageCount: 3, // How many messages to use for the query context
+    queryMessageCount: 3, // How many recent messages to use for context
     autoIndex: true,
     injectContext: true,
     injectionPosition: 'after_main',
@@ -140,7 +140,9 @@ const keywordBlacklist = new Set([
     'tonights', 'tomorrows', 'todays', 'tonight', 
     'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays',
     'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers',
-    'don', 'wasn', 'weren', 'isn', 'aren', 'didn', 'doesn', 'hasn', 'hadn', 'haven', 'wouldn', 'shouldn', 'couldn', 'mustn', 'shan', 'won', 've', 're', 'll', 's', 'm', 'd', 't'
+    'don', 'wasn', 'weren', 'isn', 'aren', 'didn', 'doesn', 'hasn', 'hadn', 'haven', 'wouldn', 'shouldn', 'couldn', 'mustn', 'shan', 'won', 've', 're', 'll', 's', 'm', 'd', 't',
+    // --- UPDATED BLACKLIST ITEMS ---
+    'leg', 'legs', 'babe', 'baby', 'darling', 'honey', 'sweetheart', 'dear', 'love'
 ]);
 
 // Helper function to get user-defined blacklist as a Set
@@ -764,53 +766,25 @@ function getQueryMessage(context, idxOverride, generationType) {
 /**
  * NEW FUNCTION: Constructs a query string from multiple messages.
  * Respects group chat presence logic (The "Melissa Check").
- */
-/**
- * NEW FUNCTION: Constructs a query string from multiple messages.
- * Respects group chat presence logic (The "Melissa Check").
- * NOW INCLUDES: Active Character Name Filtering to prevent Vector Bias.
+ * Does NOT strip names (Dense Search needs names).
  */
 function constructMultiMessageQuery(context, generationType) {
-    // 1. Get the "Anchor" message
     const anchorMsg = getQueryMessage(context, null, generationType);
     if (!anchorMsg) return "";
 
-    // 2. Prepare Name Filter
-    // We want to strip names from the query so the Vector focuses on actions/topics, not people.
-    const participantNames = getParticipantNames(context);
-    // Sort by length desc so we match "Ryan Gosling" before "Ryan"
-    const sortedNames = Array.from(participantNames).sort((a, b) => b.length - a.length);
-    let nameRegex = null;
-    if (sortedNames.length > 0) {
-        // Create regex: \b(name1|name2|name3)\b case insensitive
-        const pattern = '\\b(' + sortedNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b';
-        nameRegex = new RegExp(pattern, 'gi');
-    }
-
     const count = extensionSettings.queryMessageCount || 1;
     
-    // Quick exit for single message mode (still apply filter)
-    if (count <= 1) {
-        let text = anchorMsg.mes;
-        if (nameRegex) text = text.replace(nameRegex, '').replace(/\s+/g, ' ').trim();
-        return text;
-    }
+    // Quick exit for single message mode
+    if (count <= 1) return anchorMsg.mes;
 
-    // 3. Find anchor index
     const chat = context.chat;
     const anchorIdx = chat.lastIndexOf(anchorMsg);
-    if (anchorIdx === -1) {
-        let text = anchorMsg.mes;
-        if (nameRegex) text = text.replace(nameRegex, '').replace(/\s+/g, ' ').trim();
-        return text;
-    }
+    if (anchorIdx === -1) return anchorMsg.mes;
 
-    // 4. Identify who is "listening"
     const activeChar = getActiveCharacterName();
     const isGroup = isCurrentChatGroupChat();
     const collectedText = [];
 
-    // 5. Walk backwards
     let messagesFound = 0;
     let currentIdx = anchorIdx;
 
@@ -837,19 +811,8 @@ function constructMultiMessageQuery(context, generationType) {
         }
 
         if (isVisible && msg.mes) {
-            // --- CLEANING STEP ---
-            let cleanMes = msg.mes;
-            if (nameRegex) {
-                // Replace names with empty string
-                cleanMes = cleanMes.replace(nameRegex, '');
-                // Fix double spaces (e.g. "Hello [Ryan], how" -> "Hello , how")
-                cleanMes = cleanMes.replace(/\s+/g, ' ').trim();
-            }
-            
-            if (cleanMes.length > 0) {
-                collectedText.unshift(cleanMes);
-                messagesFound++;
-            }
+            collectedText.unshift(msg.mes);
+            messagesFound++;
         }
 
         currentIdx--;
@@ -985,9 +948,31 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         const maxIndex = (context && context.chat) ? Math.max(0, context.chat.length - excludeCount) : 999999999;
         
         const participantNames = getParticipantNames(null);
-        const queryFilterTerms = extractQueryFilterTerms(query, participantNames);
+
+        // --- PATH A: DENSE VECTOR (KEEPS NAMES) ---
+        // We want the vector to understand "Ryan did X", so we keep the names here.
         const queryEmbedding = await generateEmbedding(query);
         
+        // --- PATH B: KEYWORD FILTER (STRIPS NAMES) ---
+        // We do NOT want to match simply because the name "Ryan" is in the text.
+        // We explicitly strip the participant names from the text string BEFORE asking for keywords.
+        let textForKeywords = query;
+        const sortedNames = Array.from(participantNames).sort((a, b) => b.length - a.length);
+        if (sortedNames.length > 0) {
+            // Regex to match names (whole word, case insensitive)
+            const pattern = '\\b(' + sortedNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b';
+            const nameRegex = new RegExp(pattern, 'gi');
+            textForKeywords = textForKeywords.replace(nameRegex, ' '); // Replace with space
+        }
+        
+        // Now extract terms from the sanitized text
+        const queryFilterTerms = extractQueryFilterTerms(textForKeywords, participantNames);
+        
+        // Log this to confirm it's working for you in the console
+        if (queryFilterTerms.length > 0) {
+             console.log('[' + MODULE_NAME + '] Query Keywords (Names Removed):', queryFilterTerms);
+        }
+
         const results = await searchVectors(collectionName, queryEmbedding, extensionSettings.retrievalCount, extensionSettings.similarityThreshold, queryFilterTerms, maxIndex);
         
         if (results.length === 0) {
