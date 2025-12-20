@@ -765,33 +765,58 @@ function getQueryMessage(context, idxOverride, generationType) {
  * NEW FUNCTION: Constructs a query string from multiple messages.
  * Respects group chat presence logic (The "Melissa Check").
  */
+/**
+ * NEW FUNCTION: Constructs a query string from multiple messages.
+ * Respects group chat presence logic (The "Melissa Check").
+ * NOW INCLUDES: Active Character Name Filtering to prevent Vector Bias.
+ */
 function constructMultiMessageQuery(context, generationType) {
-    // 1. Get the "Anchor" message (the most recent relevant one) using existing logic
+    // 1. Get the "Anchor" message
     const anchorMsg = getQueryMessage(context, null, generationType);
     if (!anchorMsg) return "";
 
-    // If we only want 1, just return that (keeps legacy behavior 100% safe)
-    const count = extensionSettings.queryMessageCount || 1;
-    if (count <= 1) return anchorMsg.mes;
+    // 2. Prepare Name Filter
+    // We want to strip names from the query so the Vector focuses on actions/topics, not people.
+    const participantNames = getParticipantNames(context);
+    // Sort by length desc so we match "Ryan Gosling" before "Ryan"
+    const sortedNames = Array.from(participantNames).sort((a, b) => b.length - a.length);
+    let nameRegex = null;
+    if (sortedNames.length > 0) {
+        // Create regex: \b(name1|name2|name3)\b case insensitive
+        const pattern = '\\b(' + sortedNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b';
+        nameRegex = new RegExp(pattern, 'gi');
+    }
 
-    // 2. Find where this anchor is in the array
+    const count = extensionSettings.queryMessageCount || 1;
+    
+    // Quick exit for single message mode (still apply filter)
+    if (count <= 1) {
+        let text = anchorMsg.mes;
+        if (nameRegex) text = text.replace(nameRegex, '').replace(/\s+/g, ' ').trim();
+        return text;
+    }
+
+    // 3. Find anchor index
     const chat = context.chat;
     const anchorIdx = chat.lastIndexOf(anchorMsg);
-    if (anchorIdx === -1) return anchorMsg.mes;
+    if (anchorIdx === -1) {
+        let text = anchorMsg.mes;
+        if (nameRegex) text = text.replace(nameRegex, '').replace(/\s+/g, ' ').trim();
+        return text;
+    }
 
-    // 3. Identify who is "listening" (The Active Character)
+    // 4. Identify who is "listening"
     const activeChar = getActiveCharacterName();
     const isGroup = isCurrentChatGroupChat();
     const collectedText = [];
 
-    // 4. Walk backwards from the anchor
+    // 5. Walk backwards
     let messagesFound = 0;
     let currentIdx = anchorIdx;
 
     while (messagesFound < count && currentIdx >= 0) {
         const msg = chat[currentIdx];
         
-        // Skip system messages
         if (msg.is_system) {
             currentIdx--;
             continue;
@@ -799,32 +824,37 @@ function constructMultiMessageQuery(context, generationType) {
 
         let isVisible = true;
 
-        // GROUP CHAT VISIBILITY LOGIC ("The Melissa Check")
+        // Group Chat "Melissa Check"
         if (isGroup && activeChar) {
-            // If the active char SENT the message, they obviously know about it
             const isSender = (msg.name === activeChar);
-            
-            // Check presence list
             const presentList = (msg.present || msg.characters_present || []).map(n => String(n).toLowerCase());
             const isPresent = presentList.includes(activeChar.toLowerCase());
 
-            // Logic: If I didn't send it, and I wasn't in the presence list... I didn't hear it.
-            // Note: If presentList is empty, ST often implies "everyone present", so we default to true.
             if (!isSender && presentList.length > 0 && !isPresent) {
                 isVisible = false;
-                console.log(`[${MODULE_NAME}] Query Build: Skipping msg #${currentIdx} ("${msg.mes.substring(0,20)}...") - ${activeChar} was not present.`);
+                console.log(`[${MODULE_NAME}] Query Build: Skipping msg #${currentIdx} - Not present.`);
             }
         }
 
         if (isVisible && msg.mes) {
-            collectedText.unshift(msg.mes);
-            messagesFound++;
+            // --- CLEANING STEP ---
+            let cleanMes = msg.mes;
+            if (nameRegex) {
+                // Replace names with empty string
+                cleanMes = cleanMes.replace(nameRegex, '');
+                // Fix double spaces (e.g. "Hello [Ryan], how" -> "Hello , how")
+                cleanMes = cleanMes.replace(/\s+/g, ' ').trim();
+            }
+            
+            if (cleanMes.length > 0) {
+                collectedText.unshift(cleanMes);
+                messagesFound++;
+            }
         }
 
         currentIdx--;
     }
 
-    // Join with newlines to create a "Block" of conversation for the vector embedding
     return collectedText.join('\n');
 }
 
