@@ -28,7 +28,8 @@ const MODULE_LOG_ALLOW_SUBSTR = [
     'validated results', 'dense', 'filtered',
     'Result', 'query filter', 'retrieved', 'retrieval', 'combined',
     'Query:',          // query message selection logging
-    'Excluding'        // participant name exclusion logging
+    'Excluding',       // participant name exclusion logging
+    'Summary changed'  // logging for qvlink updates
 ];
 
 const __origConsoleLog = console.log.bind(console);
@@ -55,8 +56,8 @@ const defaultSettings = {
     openaiApiKey: '',
     openaiModel: 'text-embedding-3-small',
     retrievalCount: 5,
-    maxContextBudget: 4000, // Character limit for injected context
     similarityThreshold: 0.7,
+    maxTokenBudget: 1000, // New Token Budget Setting
     autoIndex: true,
     injectContext: true,
     injectionPosition: 'after_main',
@@ -73,6 +74,8 @@ let lastMessageCount = 0;
 let lastChatId = null;
 let pollingInterval = null;
 let indexedMessageIds = new Set();
+// Tracks the last known summary for a message index to detect Qvlink updates
+let lastKnownSummaries = new Map(); 
 let usePolling = false;
 let eventsRegistered = false;
 let lastInjectionTime = 0;
@@ -160,15 +163,12 @@ function extractKeywords(text, excludeNames = new Set()) {
     text = text.replace(/[\u2018\u2019`]/g, "'");
 
     // Run NLP on the raw text *before* stripping special chars.
-    // This allows Compromise to see contractions (like "don't") correctly because the apostrophe is intact.
     let doc = window.nlp(text);
     doc.match('#Contraction').remove();
     doc.match('#Expression').remove();
     text = doc.text();
 
     // --- STEP 2: STRIP SPECIAL CHARS ---
-    // Fixes "dream-me" -> "dream me", "Ngh—*Tre*!" -> "Ngh Tre "
-    // Replaces hyphens, em-dashes, en-dashes, underscores, and asterisks with space.
     text = text.replace(/[-–—_*]+/g, ' ');
 
     const wordsInText = text.split(/\s+/).length;
@@ -185,8 +185,6 @@ function extractKeywords(text, excludeNames = new Set()) {
     const finalKeywords = new Set();
     
     // --- STEP 3: POST-CLEAN NLP ---
-    // Re-run NLP on the now-cleaned text to build the proper Topics/Keywords list.
-    // We run the removal filters again just in case the special char stripping exposed new edge cases.
     doc = window.nlp(text);
     doc.match('#Expression').remove();
     doc.match('#Contraction').remove();
@@ -194,27 +192,23 @@ function extractKeywords(text, excludeNames = new Set()) {
     const processTerm = (term) => {
         const cleaned = term.toLowerCase().replace(/[^a-z]/g, "");
 
-        // Run the full validation gauntlet
         if (
             cleaned && cleaned.length > 2 &&
             !excludeNames.has(cleaned) &&
             !keywordBlacklist.has(cleaned) &&
-            !window.nlp(cleaned).has('#Verb') &&     // Strict verb filtering
-            !window.nlp(cleaned).has('#Pronoun') &&  // Strict pronoun filtering
-            window.nlp(cleaned).has('#Noun')         // Must be a noun
+            !window.nlp(cleaned).has('#Verb') &&
+            !window.nlp(cleaned).has('#Pronoun') &&
+            window.nlp(cleaned).has('#Noun')
         ) {
             finalKeywords.add(cleaned);
         }
     };
 
-    // Get topics and quotations as potential keyword sources
     const topics = doc.topics().out('array');
     const quotes = doc.quotations().out('array');
     const potentialSources = [...topics, ...quotes];
 
     for (const source of potentialSources) {
-        // Split by anything that isn't a letter or number.
-        // This ensures that if any punctuation remains, it splits the word rather than fusing it.
         const words = source.split(/[^a-zA-Z0-9]+/);
         for (const word of words) {
             processTerm(word);
@@ -235,7 +229,6 @@ function extractProperNouns(text, excludeNames) {
         let sentence = sentences[i].trim();
         if (!sentence) continue;
         
-        // Clean separators in sentence before splitting
         sentence = sentence.replace(/[-–—_*]+/g, ' ');
 
         const words = sentence.split(/\s+/);
@@ -586,6 +579,7 @@ async function forceReindexCurrentChat() {
     currentChatIndexed = false;
     lastMessageCount = 0;
     indexedMessageIds.clear();
+    lastKnownSummaries.clear();
     let context;
     if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
         context = SillyTavern.getContext();
@@ -694,7 +688,6 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     }
     
     // --- Normalize asterisk emphasis before keyword extraction ---
-    // Fixes "like*your*" → "like your" to prevent fused word indexing
     const normalizedMessage = (message.mes || '').replace(/(\w)\*+(\w)/g, '$1 $2');
     
     // --- The Unified Keyword Pipeline ---
@@ -772,6 +765,14 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
             updateUI('status', 'Chat already indexed (' + existingPoints + ' messages)');
             isIndexing = false;
             hideStopButton();
+            // Assuming full index, populate lastKnownSummaries for change detection
+            messages.forEach((msg, idx) => {
+                if (msg.extra && msg.extra.qvink_memory && msg.extra.qvink_memory.memory) {
+                    lastKnownSummaries.set(idx, msg.extra.qvink_memory.memory);
+                } else {
+                    lastKnownSummaries.set(idx, "");
+                }
+            });
             return true;
         }
         
@@ -805,6 +806,11 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
                 const messageIndex = batchStart + i;
                 const payload = extractPayload(message, messageIndex, chatIdHash, participantNames);
                 points.push({ id: generateUUID(), vector: embeddings[i], payload: payload });
+                
+                // Track summary state
+                const summary = (message.extra && message.extra.qvink_memory && message.extra.qvink_memory.memory) ? message.extra.qvink_memory.memory : "";
+                lastKnownSummaries.set(messageIndex, summary);
+
                 if (points.length >= upsertBatchSize) {
                     await upsertVectors(collectionName, [...points]);
                     points.length = 0;
@@ -836,6 +842,11 @@ async function indexSingleMessage(message, chatIdHash, messageIndex, isGroupChat
         const payload = extractPayload(message, messageIndex, chatIdHash, participantNames);
         const point = { id: generateUUID(), vector: embedding, payload: payload };
         await upsertVectors(collectionName, [point]);
+        
+        // Track summary state
+        const summary = (message.extra && message.extra.qvink_memory && message.extra.qvink_memory.memory) ? message.extra.qvink_memory.memory : "";
+        lastKnownSummaries.set(messageIndex, summary);
+        
         console.log('[' + MODULE_NAME + '] Indexed message ' + messageIndex);
         return true;
     } catch (error) {
@@ -888,13 +899,13 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         
         console.log('[' + MODULE_NAME + '] Retrieved ' + filteredByPresence.length + ' messages with scores:', filteredByPresence.map(r => r.score.toFixed(3)).join(', '));
         
-        // --- CONTEXT BUDGETING ---
-        let currentTotalChars = 0;
+        // --- CONTEXT BUDGETING (TOKEN BASED) ---
+        let currentTotalTokens = 0;
         const contextParts = [];
-        const budget = extensionSettings.maxContextBudget || 4000;
+        const tokenBudget = extensionSettings.maxTokenBudget || 1000;
         let budgetHit = false;
 
-        // Results are already sorted by score (Descending) from searchVectors
+        // Results are already sorted by score (Descending)
         for (const result of filteredByPresence) {
             const p = result.payload;
             const score = result.score;
@@ -902,22 +913,25 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
             if (p.summary) text += `\n\nSummary: ${p.summary}`;
             text += `\n\nFull Message: ${p.full_message}`;
 
-            if (currentTotalChars + text.length > budget) {
+            // Approximate token count (1 token ~= 4 chars)
+            const estimatedTokens = Math.ceil(text.length / 4);
+
+            if (currentTotalTokens + estimatedTokens > tokenBudget) {
                 budgetHit = true;
-                console.log('[' + MODULE_NAME + '] Context budget hit! Stopping addition of lower-scoring results.');
+                console.log('[' + MODULE_NAME + '] Token budget hit! Stopping addition of lower-scoring results.');
                 break;
             }
 
             contextParts.push(text);
-            currentTotalChars += text.length;
+            currentTotalTokens += estimatedTokens;
         }
 
         if (budgetHit) {
-            updateUI('status', '⚠️ Budget Limit Hit (' + currentTotalChars + '/' + budget + ' chars)');
+            updateUI('status', '⚠️ Budget Limit Hit (' + currentTotalTokens + '/' + tokenBudget + ' tokens)');
         }
 
         const contextString = '\n\n========== RELEVANT PAST CONTEXT FROM RAG ==========\n' + contextParts.join('\n\n-------------------\n') + '\n\n========== END RAG CONTEXT ==========\n\n';
-        console.log('[' + MODULE_NAME + '] Formatted context with full metadata (' + contextString.length + ' chars)');
+        console.log('[' + MODULE_NAME + '] Formatted context with full metadata (' + contextString.length + ' chars, approx ' + Math.ceil(contextString.length/4) + ' tokens)');
         return contextString;
     } catch (error) {
         console.error('[' + MODULE_NAME + '] Context retrieval failed:', error);
@@ -967,6 +981,7 @@ async function onChatLoaded() {
     currentChatIndexed = false;
     lastMessageCount = 0;
     indexedMessageIds.clear();
+    lastKnownSummaries.clear();
     const chatId = getCurrentChatId();
     lastChatId = chatId;
     console.log('[' + MODULE_NAME + '] Chat loaded. Chat ID:', chatId);
@@ -975,7 +990,17 @@ async function onChatLoaded() {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
         else if (typeof getContext === 'function') context = getContext();
-        if (context && context.chat) lastMessageCount = context.chat.length;
+        if (context && context.chat) {
+            lastMessageCount = context.chat.length;
+            // Initialize summaries map from loaded chat
+            context.chat.forEach((msg, idx) => {
+                if (msg.extra && msg.extra.qvink_memory && msg.extra.qvink_memory.memory) {
+                    lastKnownSummaries.set(idx, msg.extra.qvink_memory.memory);
+                } else {
+                    lastKnownSummaries.set(idx, "");
+                }
+            });
+        }
         if (chatId) {
             const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
             const pointCount = await countPoints(collectionName);
@@ -1082,6 +1107,7 @@ async function onMessageDeleted(data) {
     if (messageIndex === null) return;
     await deleteMessageByIndex(collectionName, chatId, messageIndex);
     indexedMessageIds.delete(messageIndex);
+    lastKnownSummaries.delete(messageIndex);
 }
 async function onMessageEdited(data) {
     if (!extensionSettings.enabled) return;
@@ -1125,6 +1151,7 @@ async function startPolling() {
                 lastMessageCount = context.chat.length;
                 return;
             }
+            // Check for new messages
             if (context.chat.length > lastMessageCount) {
                 for (let i = lastMessageCount; i < context.chat.length; i++) {
                     await indexSingleMessage(context.chat[i], chatId, i, isGroupChat);
@@ -1132,6 +1159,28 @@ async function startPolling() {
                 }
                 lastMessageCount = context.chat.length;
             }
+            
+            // --- NEW: Check for Qvlink Summary Updates ---
+            // Iterate through the messages we know about and check if the summary metadata has changed.
+            // This catches when Qvlink updates old messages with new summaries in the background.
+            for (let i = 0; i < context.chat.length; i++) {
+                const msg = context.chat[i];
+                const currentSum = (msg.extra && msg.extra.qvink_memory && msg.extra.qvink_memory.memory) ? msg.extra.qvink_memory.memory : "";
+                const knownSum = lastKnownSummaries.get(i);
+                
+                // If we have tracked this message but the summary is different (and not undefined)
+                if (lastKnownSummaries.has(i) && currentSum !== knownSum) {
+                    console.log('[' + MODULE_NAME + '] Summary changed for message ' + i + '. Re-indexing...');
+                    // Update our tracker immediately to prevent loop
+                    lastKnownSummaries.set(i, currentSum);
+                    // Re-index (upsert) the single message with the new summary content
+                    await indexSingleMessage(msg, chatId, i, isGroupChat);
+                } else if (!lastKnownSummaries.has(i)) {
+                    // Initialize if missing from map (e.g. from a fresh load where we didn't index)
+                    lastKnownSummaries.set(i, currentSum);
+                }
+            }
+            
         } catch (e) {
             console.warn('[' + MODULE_NAME + '] Polling error:', e.message);
         }
@@ -1228,7 +1277,7 @@ function createSettingsUI() {
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
                     <div class="ragfordummies-section"><h4>Qdrant Configuration</h4><label><span>Local URL:</span><input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" placeholder="http://localhost:6333" /></label></div>
                     <div class="ragfordummies-section"><h4>Embedding Provider</h4><label><span>Provider:</span><select id="ragfordummies_embedding_provider"><option value="kobold" ${extensionSettings.embeddingProvider === 'kobold' ? 'selected' : ''}>KoboldCpp</option><option value="ollama" ${extensionSettings.embeddingProvider === 'ollama' ? 'selected' : ''}>Ollama</option><option value="openai" ${extensionSettings.embeddingProvider === 'openai' ? 'selected' : ''}>OpenAI</option></select></label><label id="ragfordummies_kobold_settings" style="${extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none'}"><span>KoboldCpp URL:</span><input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" placeholder="http://localhost:11434" /></label><div id="ragfordummies_ollama_settings" style="${extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none'}"><label><span>Ollama URL:</span><input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" placeholder="http://localhost:11434" /></label><label><span>Ollama Model:</span><input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" placeholder="nomic-embed-text" /></label></div><div id="ragfordummies_openai_settings" style="${extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none'}"><label><span>OpenAI API Key:</span><input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" placeholder="sk-..." /></label><label><span>OpenAI Model:</span><input type="text" id="ragfordummies_openai_model" value="${extensionSettings.openaiModel}" placeholder="text-embedding-3-small" /></label></div></div>
-                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Context Budget (Characters):</span><input type="number" id="ragfordummies_max_context_budget" value="${extensionSettings.maxContextBudget || 4000}" min="500" max="20000" /><small style="opacity:0.7; display:block; margin-top:5px;">Limits how much RAG text is inserted. If full, lower-scoring results are dropped to fit.</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
+                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /><small style="opacity:0.7; display:block; margin-top:5px;">Estimated (1 token ≈ 4 chars). Limits injection size.</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
                     <div class="ragfordummies-section"><h4>Custom Keyword Blacklist</h4><label><span>Blacklisted Terms (comma-separated):</span><input type="text" id="ragfordummies_user_blacklist" value="${extensionSettings.userBlacklist || ''}" placeholder="baka, sweetheart, darling" /></label><small style="opacity:0.7; display:block; margin-top:5px;">Can be useful for things like pet names between you and your character appearing in the hybrid search. (Most likely not needed, as vector scoring takes care of this.) Do not touch unless you know what you're doing.</small></div>
                     <div class="ragfordummies-section"><h4>Context Injection Position</h4><label><span>Injection Position:</span><select id="ragfordummies_injection_position"><option value="before_main" ${extensionSettings.injectionPosition === 'before_main' ? 'selected' : ''}>Before Main Prompt</option><option value="after_main" ${extensionSettings.injectionPosition === 'after_main' ? 'selected' : ''}>After Main Prompt</option><option value="after_messages" ${extensionSettings.injectionPosition === 'after_messages' ? 'selected' : ''}>After X Messages</option></select></label><label id="ragfordummies_inject_after_messages_setting" style="${extensionSettings.injectionPosition === 'after_messages' ? '' : 'display:none'}"><span>Messages from End:</span><input type="number" id="ragfordummies_inject_after_messages" value="${extensionSettings.injectAfterMessages}" min="0" max="50" /><small style="opacity:0.7; display:block; margin-top:5px;">0 = at the very end, 3 = after last 3 messages</small></label></div>
                     <div class="ragfordummies-section"><h4>Manual Operations</h4><button id="ragfordummies_index_current" class="menu_button">Index Current Chat</button><button id="ragfordummies_force_reindex" class="menu_button">Force Re-index (Rebuild)</button><button id="ragfordummies_stop_indexing" class="menu_button ragfordummies-stop-btn">Stop Indexing</button><hr style="border-color: var(--SmartThemeBorderColor); margin: 10px 0;" /><label class="checkbox_label" style="margin-bottom: 8px;"><input type="checkbox" id="ragfordummies_merge_uploads" checked /><span>Merge uploads into current chat collection</span></label><button id="ragfordummies_upload_btn" class="menu_button">Upload File (JSONL or txt)</button><input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" /><div id="ragfordummies_status" class="ragfordummies-status">Ready</div></div>
@@ -1242,7 +1291,7 @@ function attachEventListeners() {
         'enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
         'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'auto_index', 
         'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
-        'max_context_budget'
+        'max_token_budget'
     ];
     settingIds.forEach(id => {
         const element = document.getElementById('ragfordummies_' + id);
