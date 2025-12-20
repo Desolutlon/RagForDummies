@@ -80,12 +80,41 @@ const INJECTION_DEBOUNCE_MS = 1000;
 // ===========================
 
 /**
- * Extracts high-signal NOUNS from text using a dynamic limit for maximum relevance.
- * This is the new NLP-based keyword extractor.
- * @param {string} text The message text.
- * @param {Set<string>} excludeNames A set of names to ignore.
- * @returns {string[]} An array of the most relevant, high-precision noun keywords.
+ * The single source of truth for keyword validation.
+ * Agressively cleans and validates a word to ensure it is a high-quality noun keyword.
+ * Returns the cleaned word if valid, otherwise returns null.
  */
+function validateKeyword(term, excludeNames = new Set()) {
+    // A single, unified blacklist for all keyword extraction.
+    const keywordBlacklist = new Set([
+        'thing', 'things', 'stuff', 'person', 'people', 'man', 'woman', 'men', 'women', 'guy', 'way', 'day', 'time', 'year', 'life',
+        'part', 'world', 'case', 'friend', 'group', 'lot', 'number', 'end', 'place', 'work', 'hand', 'point', 'form', 'kind',
+        'home', 'body', 'room', 'face', 'side', 'head', 'water', 'fact', 'name', 'story', 'problem', 'question', 'answer',
+        'reason', 'idea', 'moment', 'bit', 'word', 'boy', 'girl', 'child', 'children',
+        'something', 'anything', 'everything', 'nothing', 'someone', 'anyone', 'everyone', 'nobody',
+        "i'd", "i'm", "i've", 'yours', 'you', 'fine', 'now', 'get', 'dont', 'worry'
+    ]);
+
+    // 1. Aggressively clean the term.
+    const cleaned = term.toLowerCase()
+        .replace(/'s$/, '') // Handle possessives like "Sayori's" -> "sayori"
+        .replace(/\.{2,}/g, '') // Handle ellipses "..."
+        .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"']/g, ""); // Strip all other special characters and quotes
+
+    // 2. Perform all validation checks on the cleaned term.
+    if (
+        cleaned.length <= 2 ||                     // Too short
+        excludeNames.has(cleaned) ||                // Is a participant's name
+        keywordBlacklist.has(cleaned) ||            // On the blacklist
+        /\d/.test(cleaned) ||                       // Contains a number
+        !window.nlp(cleaned).has('#Noun')           // *** The final check: Is it actually a noun? ***
+    ) {
+        return null; // It's invalid.
+    }
+
+    return cleaned; // It's a valid, clean keyword.
+}
+
 function extractKeywords(text, excludeNames = new Set()) {
     if (typeof window.nlp === 'undefined' || !text) {
         return [];
@@ -102,49 +131,109 @@ function extractKeywords(text, excludeNames = new Set()) {
     const additionalKeywords = Math.floor((wordsInText - 100) / 100) * scalingFactor;
     const limit = baseKeywords + additionalKeywords;
 
-    const nounBlacklist = new Set([
-        'thing', 'things', 'stuff', 'person', 'people', 'man', 'woman', 'men', 'women', 'guy', 'way', 'day', 'time', 'year', 'life',
-        'part', 'world', 'case', 'friend', 'group', 'lot', 'number', 'end', 'place', 'work', 'hand', 'point', 'form', 'kind',
-        'home', 'body', 'room', 'face', 'side', 'head', 'water', 'fact', 'name', 'story', 'problem', 'question', 'answer',
-        'reason', 'idea', 'moment', 'bit', 'word', 'boy', 'girl', 'child', 'children',
-        'something', 'anything', 'everything', 'nothing', 'someone', 'anyone', 'everyone', 'nobody',
-        "i'd", "i'm", "i've"
-    ]);
-
     const finalKeywords = new Set();
     const doc = window.nlp(text);
 
-    const processAndValidateTerm = (term) => {
-        const cleaned = term.toLowerCase()
-            .replace(/'s$/, '')
-            .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"']/g, "");
-
-        if (
-            cleaned.length > 2 &&
-            !excludeNames.has(cleaned) &&
-            !nounBlacklist.has(cleaned) &&
-            !(/\d/.test(cleaned))
-        ) {
-            finalKeywords.add(cleaned);
-        }
-    };
-
+    // Get topics and quotations as potential keyword sources
     const topics = doc.topics().out('array');
-    for (const topic of topics) {
-        const words = topic.split(/\s+/);
+    const quotes = doc.quotations().out('array');
+    const potentialSources = [...topics, ...quotes];
+
+    for (const source of potentialSources) {
+        const words = source.split(/\s+/);
         for (const word of words) {
-            processAndValidateTerm(word);
+            const validatedWord = validateKeyword(word, excludeNames);
+            if (validatedWord) {
+                finalKeywords.add(validatedWord);
+            }
+        }
+    }
+
+    return Array.from(finalKeywords).slice(0, limit);
+}
+
+function extractProperNouns(text, excludeNames) {
+    if (excludeNames === undefined) excludeNames = new Set();
+    if (!text || typeof text !== 'string') return [];
+    
+    const properNouns = new Set();
+    
+    // This giant list of common words is still useful for the capitalization rule.
+    // It prevents us from even considering a capitalized "The" or "But" at the start of a sentence.
+    const commonWords = new Set([
+        'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs',
+        'this', 'that', 'these', 'those', 'what', 'which', 'who', 'whom', 'whose', 'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'why', 'how',
+        'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'into', 'onto', 'upon', 'about', 'over', 'under', 'through', 'between', 'among', 'all', 'each', 'every',
+        'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'also', 'now', 'here', 'there',
+        'always', 'never', 'sometimes', 'often', 'usually', 'as', 'up', 'down', 'out', 'off', 'away', 'im', 'ive', 'id', 'ill', 'youre', 'youve', 'youd', 'youll', 'hes', 'shes',
+        'weve', 'were', 'wed', 'well', 'theyve', 'theyre', 'theyd', 'theyll', 'isnt', 'arent', 'wasnt', 'werent', 'dont', 'doesnt', 'didnt', 'wont', 'wouldnt', 'couldnt',
+        'shouldnt', 'cant', 'cannot', 'hadnt', 'hasnt', 'havent', 'lets', 'thats', 'whats', 'whos', 'hows', 'wheres', 'whens', 'whys', 'is', 'are', 'was', 'be', 'been',
+        'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'say', 'said',
+        'says', 'see', 'saw', 'seen', 'get', 'got', 'go', 'went', 'gone', 'come', 'came', 'know', 'knew', 'think', 'thought', 'make', 'made', 'take', 'took', 'want', 'wanted',
+        'look', 'looked', 'give', 'gave', 'use', 'used', 'find', 'found', 'tell', 'told', 'let', 'put', 'keep', 'kept', 'leave', 'left', 'begin', 'began', 'seem', 'seemed',
+        'help', 'helped', 'show', 'showed', 'hear', 'heard', 'play', 'played', 'run', 'ran', 'live', 'lived', 'believe', 'believed', 'hold', 'held', 'bring', 'brought',
+        'write', 'wrote', 'read', 'sit', 'stand', 'lose', 'lost', 'pay', 'paid', 'meet', 'met', 'include', 'included', 'continue', 'continued', 'set', 'learn', 'learned',
+        'change', 'changed', 'lead', 'led', 'understand', 'understood', 'watch', 'watched', 'follow', 'followed', 'stop', 'stopped', 'create', 'created', 'speak',
+        'spoke', 'allow', 'allowed', 'add', 'added', 'spend', 'spent', 'grow', 'grew', 'open', 'opened', 'walk', 'walked', 'win', 'won', 'offer', 'offered', 'remember',
+        'remembered', 'love', 'loved', 'consider', 'considered', 'appear', 'appeared', 'buy', 'bought', 'wait', 'waited', 'serve', 'served', 'die', 'died', 'send',
+        'sent', 'expect', 'expected', 'build', 'built', 'stay', 'stayed', 'fall', 'fell', 'cut', 'reach', 'kill', 'killed', 'remain', 'remained', 'good', 'bad', 'great',
+        'big', 'small', 'old', 'new', 'first', 'last', 'long', 'little', 'own', 'other', 'right', 'left', 'really', 'actually', 'probably', 'maybe', 'perhaps', 'definitely',
+        'certainly', 'high', 'low', 'young', 'early', 'late', 'important', 'public', 'different', 'possible', 'full', 'special', 'free', 'strong', 'certain', 'real',
+        'best', 'better', 'true', 'whole', 'oh', 'ah', 'um', 'uh', 'hey', 'hi', 'hello', 'bye', 'yes', 'no', 'yeah', 'yea', 'yep', 'nope', 'okay', 'ok', 'well', 'like', 'huh',
+        'hmm', 'hm', 'mhm', 'ugh', 'ooh', 'oops', 'wow', 'whoa', 'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'god',
+        'omg', 'wtf', 'lol', 'lmao', 'rofl', 'today', 'tomorrow', 'yesterday', 'morning', 'afternoon', 'evening', 'night', 'week', 'month', 'year', 'day', 'hour', 'minute',
+        'second', 'time', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'january', 'february', 'march', 'april', 'may', 'june', 'july',
+        'august', 'september', 'october', 'november', 'december', 'besides', 'however', 'although', 'though', 'because', 'since', 'while', 'after', 'before', 'until',
+        'unless', 'anyway', 'anyways', 'meanwhile', 'furthermore', 'moreover', 'therefore', 'otherwise', 'instead', 'still', 'maybe', 'perhaps', 'apparently',
+        'obviously', 'clearly', 'honestly', 'seriously', 'basically', 'literally', 'sure', 'fine', 'thanks', 'thank', 'sorry', 'please', 'wait', 'stop', 'look', 'listen',
+        'watch', 'minor', 'major', 'nice', 'cool', 'awesome', 'amazing', 'terrible', 'horrible', 'wonderful', 'beautiful', 'enough', 'exactly', 'absolutely', 'totally',
+        'completely', 'perfectly', 'simply', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'something', 'nothing', 'everything',
+        'anything', 'someone', 'anyone', 'everyone', 'nobody', 'somewhere', 'anywhere', 'everywhere', 'nowhere', 'much', 'many', 'lot', 'lots', 'bit', 'kind', 'sort',
+        'type', 'way', 'thing', 'things', 'stuff', 'even', 'ever', 'still', 'already', 'yet', 'soon', 'later', 'again', 'once', 'twice', 'back', 'away', 'around', 'part',
+        'place', 'case', 'point', 'fact', 'hand', 'side', 'world', 'life', 'work', 'home', 'end', 'man', 'men', 'woman', 'women', 'child', 'children', 'people', 'person',
+        'family', 'friend', 'friends', 'sealed', 'unsealed', 'suddenly', 'quickly', 'slowly', 'gently', 'softly', 'quietly', 'loudly', 'smiles', 'smiling', 'smiled',
+        'laughs', 'laughing', 'laughed', 'sighs', 'sighing', 'sighed', 'nods', 'nodding', 'nodded', 'shakes', 'shaking', 'shook', 'looks', 'looking', 'walks', 'walking',
+        'turns', 'turning', 'turned', 'stands', 'standing', 'stood', 'sits', 'sitting', 'sat', 'grins', 'grinning', 'grinned', 'chuckles', 'chuckling', 'chuckled',
+        'giggles', 'giggling', 'giggled', 'pauses', 'pausing', 'paused', 'thinks', 'thinking', 'feels', 'feeling', 'felt', 'takes', 'taking', 'gives', 'giving',
+        'puts', 'putting', 'gets', 'getting', 'moves', 'moving', 'moved', 'steps', 'stepping', 'stepped', 'reaches', 'reaching', 'reached', 'pulls', 'pulling', 'pulled',
+        'pushes', 'pushing', 'pushed', 'holds', 'holding', 'held', 'starts', 'starting', 'started', 'stops', 'stopping', 'stopped', 'tries', 'trying', 'tried', 'says',
+        'saying', 'asks', 'asking', 'asked', 'tells', 'telling', 'replies', 'replying', 'replied', 'tilts', 'tilting', 'tilted', 'raises', 'raising', 'raised', 'lowers',
+        'lowering', 'lowered', 'leans', 'leaning', 'leaned', 'rests', 'resting', 'rested', 'places', 'placing', 'placed', 'notices', 'noticing', 'noticed', 'realizes',
+        'realizing', 'realized', 'wonders', 'wondering', 'wondered', 'blinks', 'blinking', 'blinked', 'stares', 'staring', 'stared', 'glances', 'glancing', 'glanced',
+        'whispers', 'whispering', 'whispered', 'murmurs', 'murmuring', 'murmured', 'mutters', 'muttering', 'muttered', 'continues', 'continuing', 'continued', 'begins',
+        'beginning', 'began', 'finishes', 'finishing', 'finished', 'seems', 'seeming', 'seemed', 'appears', 'appearing', 'appeared', 'sounds', 'sounding', 'sounded',
+        'tone', 'voice', 'expression', 'face', 'eyes', 'head', 'body', 'arm', 'arms', 'hand', 'hands', 'finger', 'fingers', 'teasing', 'teased', 'smug', 'smugly',
+        'playful', 'playfully', 'curious', 'curiously', 'nervous', 'nervously', 'soft', 'warm', 'cold', 'hot', 'light', 'dark', 'bright', 'quiet', 'loud', 'gentle',
+        'rough', 'slight', 'slightly', 'brief', 'briefly', 'quick', 'slow', 'sudden', 'careful', 'carefully'
+    ]);
+    
+    const sentences = text.split(/[.!?*]+|["'"]\s*/);
+    
+    for (let i = 0; i < sentences.length; i++) {
+        const sentence = sentences[i].trim();
+        if (!sentence) continue;
+        
+        const words = sentence.split(/\s+/);
+        
+        for (let j = 1; j < words.length; j++) {
+            const word = words[j];
+            if (j > 0) {
+                const prevWord = words[j-1];
+                if (prevWord && /["'"]$/.test(prevWord)) continue;
+            }
+
+            const cleaned = word.replace(/^[^a-zA-Z]+|[^a-zA-Z]+$/g, '');
+            
+            if (cleaned.length >= 2 && /^[A-Z]/.test(cleaned) && !commonWords.has(cleaned.toLowerCase())) {
+                const validatedWord = validateKeyword(cleaned, excludeNames);
+                if (validatedWord) {
+                    properNouns.add(validatedWord);
+                }
+            }
         }
     }
     
-    doc.quotations().out('array').forEach(quote => {
-        const quoteWords = quote.split(/\s+/);
-        for (const word of quoteWords) {
-            processAndValidateTerm(word);
-        }
-    });
-
-    return Array.from(finalKeywords).slice(0, limit);
+    return Array.from(properNouns);
 }
 
 function generateUUID() {
@@ -213,91 +302,6 @@ function getParticipantNames(contextOrChat) {
     }
     
     return names;
-}
-
-function extractProperNouns(text, excludeNames) {
-    if (excludeNames === undefined) excludeNames = new Set();
-    if (!text || typeof text !== 'string') return [];
-    
-    const properNouns = new Set();
-    const commonWords = new Set([
-        'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs',
-        'this', 'that', 'these', 'those', 'what', 'which', 'who', 'whom', 'whose', 'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'why', 'how',
-        'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'into', 'onto', 'upon', 'about', 'over', 'under', 'through', 'between', 'among', 'all', 'each', 'every',
-        'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'also', 'now', 'here', 'there',
-        'always', 'never', 'sometimes', 'often', 'usually', 'as', 'up', 'down', 'out', 'off', 'away', 'im', 'ive', 'id', 'ill', 'youre', 'youve', 'youd', 'youll', 'hes', 'shes',
-        'weve', 'were', 'wed', 'well', 'theyve', 'theyre', 'theyd', 'theyll', 'isnt', 'arent', 'wasnt', 'werent', 'dont', 'doesnt', 'didnt', 'wont', 'wouldnt', 'couldnt',
-        'shouldnt', 'cant', 'cannot', 'hadnt', 'hasnt', 'havent', 'lets', 'thats', 'whats', 'whos', 'hows', 'wheres', 'whens', 'whys', 'is', 'are', 'was', 'be', 'been',
-        'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'say', 'said',
-        'says', 'see', 'saw', 'seen', 'get', 'got', 'go', 'went', 'gone', 'come', 'came', 'know', 'knew', 'think', 'thought', 'make', 'made', 'take', 'took', 'want', 'wanted',
-        'look', 'looked', 'give', 'gave', 'use', 'used', 'find', 'found', 'tell', 'told', 'let', 'put', 'keep', 'kept', 'leave', 'left', 'begin', 'began', 'seem', 'seemed',
-        'help', 'helped', 'show', 'showed', 'hear', 'heard', 'play', 'played', 'run', 'ran', 'live', 'lived', 'believe', 'believed', 'hold', 'held', 'bring', 'brought',
-        'write', 'wrote', 'read', 'sit', 'stand', 'lose', 'lost', 'pay', 'paid', 'meet', 'met', 'include', 'included', 'continue', 'continued', 'set', 'learn', 'learned',
-        'change', 'changed', 'lead', 'led', 'understand', 'understood', 'watch', 'watched', 'follow', 'followed', 'stop', 'stopped', 'create', 'created', 'speak',
-        'spoke', 'allow', 'allowed', 'add', 'added', 'spend', 'spent', 'grow', 'grew', 'open', 'opened', 'walk', 'walked', 'win', 'won', 'offer', 'offered', 'remember',
-        'remembered', 'love', 'loved', 'consider', 'considered', 'appear', 'appeared', 'buy', 'bought', 'wait', 'waited', 'serve', 'served', 'die', 'died', 'send',
-        'sent', 'expect', 'expected', 'build', 'built', 'stay', 'stayed', 'fall', 'fell', 'cut', 'reach', 'kill', 'killed', 'remain', 'remained', 'good', 'bad', 'great',
-        'big', 'small', 'old', 'new', 'first', 'last', 'long', 'little', 'own', 'other', 'right', 'left', 'really', 'actually', 'probably', 'maybe', 'perhaps', 'definitely',
-        'certainly', 'high', 'low', 'young', 'early', 'late', 'important', 'public', 'different', 'possible', 'full', 'special', 'free', 'strong', 'certain', 'real',
-        'best', 'better', 'true', 'whole', 'oh', 'ah', 'um', 'uh', 'hey', 'hi', 'hello', 'bye', 'yes', 'no', 'yeah', 'yea', 'yep', 'nope', 'okay', 'ok', 'well', 'like', 'huh',
-        'hmm', 'hm', 'mhm', 'ugh', 'ooh', 'oops', 'wow', 'whoa', 'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'god',
-        'omg', 'wtf', 'lol', 'lmao', 'rofl', 'today', 'tomorrow', 'yesterday', 'morning', 'afternoon', 'evening', 'night', 'week', 'month', 'year', 'day', 'hour', 'minute',
-        'second', 'time', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday', 'january', 'february', 'march', 'april', 'may', 'june', 'july',
-        'august', 'september', 'october', 'november', 'december', 'besides', 'however', 'although', 'though', 'because', 'since', 'while', 'after', 'before', 'until',
-        'unless', 'anyway', 'anyways', 'meanwhile', 'furthermore', 'moreover', 'therefore', 'otherwise', 'instead', 'still', 'maybe', 'perhaps', 'apparently',
-        'obviously', 'clearly', 'honestly', 'seriously', 'basically', 'literally', 'sure', 'fine', 'thanks', 'thank', 'sorry', 'please', 'wait', 'stop', 'look', 'listen',
-        'watch', 'minor', 'major', 'nice', 'cool', 'awesome', 'amazing', 'terrible', 'horrible', 'wonderful', 'beautiful', 'enough', 'exactly', 'absolutely', 'totally',
-        'completely', 'perfectly', 'simply', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'something', 'nothing', 'everything',
-        'anything', 'someone', 'anyone', 'everyone', 'nobody', 'somewhere', 'anywhere', 'everywhere', 'nowhere', 'much', 'many', 'lot', 'lots', 'bit', 'kind', 'sort',
-        'type', 'way', 'thing', 'things', 'stuff', 'even', 'ever', 'still', 'already', 'yet', 'soon', 'later', 'again', 'once', 'twice', 'back', 'away', 'around', 'part',
-        'place', 'case', 'point', 'fact', 'hand', 'side', 'world', 'life', 'work', 'home', 'end', 'man', 'men', 'woman', 'women', 'child', 'children', 'people', 'person',
-        'family', 'friend', 'friends', 'sealed', 'unsealed', 'suddenly', 'quickly', 'slowly', 'gently', 'softly', 'quietly', 'loudly', 'smiles', 'smiling', 'smiled',
-        'laughs', 'laughing', 'laughed', 'sighs', 'sighing', 'sighed', 'nods', 'nodding', 'nodded', 'shakes', 'shaking', 'shook', 'looks', 'looking', 'walks', 'walking',
-        'turns', 'turning', 'turned', 'stands', 'standing', 'stood', 'sits', 'sitting', 'sat', 'grins', 'grinning', 'grinned', 'chuckles', 'chuckling', 'chuckled',
-        'giggles', 'giggling', 'giggled', 'pauses', 'pausing', 'paused', 'thinks', 'thinking', 'feels', 'feeling', 'felt', 'takes', 'taking', 'gives', 'giving',
-        'puts', 'putting', 'gets', 'getting', 'moves', 'moving', 'moved', 'steps', 'stepping', 'stepped', 'reaches', 'reaching', 'reached', 'pulls', 'pulling', 'pulled',
-        'pushes', 'pushing', 'pushed', 'holds', 'holding', 'held', 'starts', 'starting', 'started', 'stops', 'stopping', 'stopped', 'tries', 'trying', 'tried', 'says',
-        'saying', 'asks', 'asking', 'asked', 'tells', 'telling', 'replies', 'replying', 'replied', 'tilts', 'tilting', 'tilted', 'raises', 'raising', 'raised', 'lowers',
-        'lowering', 'lowered', 'leans', 'leaning', 'leaned', 'rests', 'resting', 'rested', 'places', 'placing', 'placed', 'notices', 'noticing', 'noticed', 'realizes',
-        'realizing', 'realized', 'wonders', 'wondering', 'wondered', 'blinks', 'blinking', 'blinked', 'stares', 'staring', 'stared', 'glances', 'glancing', 'glanced',
-        'whispers', 'whispering', 'whispered', 'murmurs', 'murmuring', 'murmured', 'mutters', 'muttering', 'muttered', 'continues', 'continuing', 'continued', 'begins',
-        'beginning', 'began', 'finishes', 'finishing', 'finished', 'seems', 'seeming', 'seemed', 'appears', 'appearing', 'appeared', 'sounds', 'sounding', 'sounded',
-        'tone', 'voice', 'expression', 'face', 'eyes', 'head', 'body', 'arm', 'arms', 'hand', 'hands', 'finger', 'fingers', 'teasing', 'teased', 'smug', 'smugly',
-        'playful', 'playfully', 'curious', 'curiously', 'nervous', 'nervously', 'soft', 'warm', 'cold', 'hot', 'light', 'dark', 'bright', 'quiet', 'loud', 'gentle',
-        'rough', 'slight', 'slightly', 'brief', 'briefly', 'quick', 'slow', 'sudden', 'careful', 'carefully'
-    ]);
-    
-    const sentences = text.split(/[.!?*]+|["'"]\s*/);
-    
-    for (let i = 0; i < sentences.length; i++) {
-        const sentence = sentences[i].trim();
-        if (!sentence) continue;
-        
-        const words = sentence.split(/\s+/);
-        
-        for (let j = 1; j < words.length; j++) {
-            const word = words[j];
-            if (j > 0) {
-                const prevWord = words[j-1];
-                if (prevWord && /["'"]$/.test(prevWord)) continue;
-            }
-            if (word.indexOf("'") !== -1 && !word.endsWith("'s")) continue;
-            if (/^\d/.test(word)) continue;
-            if (/\d/.test(word) && /[a-zA-Z]/.test(word)) continue;
-            
-            const cleaned = word.replace(/^[^a-zA-Z]+|[^a-zA-Z]+$/g, '').replace(/'s$/, '');
-            
-            if (cleaned.length >= 2 && cleaned.length <= 20 && /^[A-Z]/.test(cleaned)) {
-                const lower = cleaned.toLowerCase();
-                if (commonWords.has(lower)) continue;
-                if (cleaned === cleaned.toUpperCase() && cleaned.length > 2) continue;
-                if (excludeNames.has(lower)) continue;
-                properNouns.add(lower);
-            }
-        }
-    }
-    
-    return Array.from(properNouns);
 }
 
 function extractQueryFilterTerms(text, excludeNames) {
