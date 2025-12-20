@@ -29,7 +29,8 @@ const MODULE_LOG_ALLOW_SUBSTR = [
     'Result', 'query filter', 'retrieved', 'retrieval', 'combined',
     'Query:',          // query message selection logging
     'Excluding',       // participant name exclusion logging
-    'Summary changed'  // logging for qvlink updates
+    'Summary changed', // logging for qvlink updates
+    'Qvlink Sync'      // Explicit tag for summary updates
 ];
 
 const __origConsoleLog = console.log.bind(console);
@@ -159,10 +160,7 @@ function extractKeywords(text, excludeNames = new Set()) {
     }
 
     // --- STEP 1: NORMALIZE & PRE-CLEAN NLP ---
-    // Convert curly quotes to straight quotes so Compromise recognizes contractions
     text = text.replace(/[\u2018\u2019`]/g, "'");
-
-    // Run NLP on the raw text *before* stripping special chars.
     let doc = window.nlp(text);
     doc.match('#Contraction').remove();
     doc.match('#Expression').remove();
@@ -228,17 +226,12 @@ function extractProperNouns(text, excludeNames) {
     for (let i = 0; i < sentences.length; i++) {
         let sentence = sentences[i].trim();
         if (!sentence) continue;
-        
         sentence = sentence.replace(/[-–—_*]+/g, ' ');
-
         const words = sentence.split(/\s+/);
-        
         for (let j = 0; j < words.length; j++) {
             const word = words[j];
-            
             if (j > 0 && /^[A-Z]/.test(word)) {
                 const cleaned = word.toLowerCase().replace(/[^a-z]/g, "");
-
                 if (
                     cleaned && cleaned.length > 2 &&
                     !excludeNames.has(cleaned) &&
@@ -1174,11 +1167,20 @@ async function startPolling() {
                 
                 // If we have tracked this message but the summary is different (and not undefined)
                 if (lastKnownSummaries.has(i) && currentSum !== knownSum) {
-                    console.log('[' + MODULE_NAME + '] Summary changed for message ' + i + '. Re-indexing...');
+                    console.log('[' + MODULE_NAME + '] [Qvlink Sync] Summary changed for message ' + i + '. Re-indexing...');
+                    updateUI('status', '↻ Syncing summary for msg #' + i);
                     // Update our tracker immediately to prevent loop
                     lastKnownSummaries.set(i, currentSum);
                     // Re-index (upsert) the single message with the new summary content
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
+                    
+                    // Clear the status text after a brief moment
+                    setTimeout(() => {
+                        const statusEl = document.getElementById('ragfordummies_status');
+                        if (statusEl && statusEl.textContent.indexOf('Syncing summary') !== -1) {
+                            statusEl.textContent = 'Ready';
+                        }
+                    }, 2000);
                 } else if (!lastKnownSummaries.has(i)) {
                     // Initialize if missing from map (e.g. from a fresh load where we didn't index)
                     lastKnownSummaries.set(i, currentSum);
