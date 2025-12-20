@@ -170,6 +170,8 @@ function extractKeywords(text, excludeNames = new Set()) {
     text = doc.text();
 
     // --- STEP 2: STRIP SPECIAL CHARS ---
+    // Fixes "dream-me" -> "dream me", "Ngh—*Tre*!" -> "Ngh Tre "
+    // Replaces hyphens, em-dashes, en-dashes, underscores, and asterisks with space.
     text = text.replace(/[-–—_*]+/g, ' ');
 
     const wordsInText = text.split(/\s+/).length;
@@ -186,6 +188,8 @@ function extractKeywords(text, excludeNames = new Set()) {
     const finalKeywords = new Set();
     
     // --- STEP 3: POST-CLEAN NLP ---
+    // Re-run NLP on the now-cleaned text to build the proper Topics/Keywords list.
+    // We run the removal filters again just in case the special char stripping exposed new edge cases.
     doc = window.nlp(text);
     doc.match('#Expression').remove();
     doc.match('#Contraction').remove();
@@ -193,23 +197,27 @@ function extractKeywords(text, excludeNames = new Set()) {
     const processTerm = (term) => {
         const cleaned = term.toLowerCase().replace(/[^a-z]/g, "");
 
+        // Run the full validation gauntlet
         if (
             cleaned && cleaned.length > 2 &&
             !excludeNames.has(cleaned) &&
             !keywordBlacklist.has(cleaned) &&
-            !window.nlp(cleaned).has('#Verb') &&
-            !window.nlp(cleaned).has('#Pronoun') &&
-            window.nlp(cleaned).has('#Noun')
+            !window.nlp(cleaned).has('#Verb') &&     // Strict verb filtering
+            !window.nlp(cleaned).has('#Pronoun') &&  // Strict pronoun filtering
+            window.nlp(cleaned).has('#Noun')         // Must be a noun
         ) {
             finalKeywords.add(cleaned);
         }
     };
 
+    // Get topics and quotations as potential keyword sources
     const topics = doc.topics().out('array');
     const quotes = doc.quotations().out('array');
     const potentialSources = [...topics, ...quotes];
 
     for (const source of potentialSources) {
+        // Split by anything that isn't a letter or number.
+        // This ensures that if any punctuation remains, it splits the word rather than fusing it.
         const words = source.split(/[^a-zA-Z0-9]+/);
         for (const word of words) {
             processTerm(word);
@@ -229,12 +237,18 @@ function extractProperNouns(text, excludeNames) {
     for (let i = 0; i < sentences.length; i++) {
         let sentence = sentences[i].trim();
         if (!sentence) continue;
+        
+        // Clean separators in sentence before splitting
         sentence = sentence.replace(/[-–—_*]+/g, ' ');
+
         const words = sentence.split(/\s+/);
+        
         for (let j = 0; j < words.length; j++) {
             const word = words[j];
+            
             if (j > 0 && /^[A-Z]/.test(word)) {
                 const cleaned = word.toLowerCase().replace(/[^a-z]/g, "");
+
                 if (
                     cleaned && cleaned.length > 2 &&
                     !excludeNames.has(cleaned) &&
@@ -1167,6 +1181,7 @@ async function startPolling() {
             }
             
             // --- Qvlink Summary Sync ---
+            // console.log('[' + MODULE_NAME + '] [DEBUG] Poller checking ' + context.chat.length + ' messages for summary updates...');
             for (let i = 0; i < context.chat.length; i++) {
                 const msg = context.chat[i];
                 const currentSum = getSummaryFromMsg(msg);
