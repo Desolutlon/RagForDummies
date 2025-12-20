@@ -160,7 +160,10 @@ function extractKeywords(text, excludeNames = new Set()) {
     }
 
     // --- STEP 1: NORMALIZE & PRE-CLEAN NLP ---
+    // Convert curly quotes to straight quotes so Compromise recognizes contractions
     text = text.replace(/[\u2018\u2019`]/g, "'");
+
+    // Run NLP on the raw text *before* stripping special chars.
     let doc = window.nlp(text);
     doc.match('#Contraction').remove();
     doc.match('#Expression').remove();
@@ -656,6 +659,14 @@ function parseJSONL(jsonlContent) {
     return { chatMetadata, messages };
 }
 
+// Helper to reliably extract summary from message object
+function getSummaryFromMsg(msg) {
+    if (msg && msg.extra && msg.extra.qvink_memory && typeof msg.extra.qvink_memory.memory === 'string') {
+        return msg.extra.qvink_memory.memory;
+    }
+    return "";
+}
+
 function buildEmbeddingText(message, tracker) {
     const parts = ['[Character: ' + message.name + ']'];
     if (tracker) {
@@ -663,8 +674,10 @@ function buildEmbeddingText(message, tracker) {
         if (tracker.Topics && tracker.Topics.PrimaryTopic) parts.push('[Topic: ' + tracker.Topics.PrimaryTopic + ']');
         if (tracker.Topics && tracker.Topics.EmotionalTone) parts.push('[Tone: ' + tracker.Topics.EmotionalTone + ']');
     }
-    if (message.extra && message.extra.qvink_memory && message.extra.qvink_memory.memory) {
-        parts.push('\nSummary: ' + message.extra.qvink_memory.memory);
+    
+    const summary = getSummaryFromMsg(message);
+    if (summary) {
+        parts.push('\nSummary: ' + summary);
     }
     parts.push('\nMessage: ' + message.mes);
     return parts.join(' ');
@@ -690,7 +703,7 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     const allKeywords = new Set([...properNounCandidates, ...commonKeywordCandidates]);
     // --- End Pipeline ---
 
-    const summary = (message.extra && message.extra.qvink_memory && message.extra.qvink_memory.memory) ? message.extra.qvink_memory.memory : '';
+    const summary = getSummaryFromMsg(message);
     
     return {
         chat_id_hash: chatIdHash, message_index: messageIndex, character_name: message.name, is_user: !!message.is_user,
@@ -758,13 +771,9 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
             updateUI('status', 'Chat already indexed (' + existingPoints + ' messages)');
             isIndexing = false;
             hideStopButton();
-            // Assuming full index, populate lastKnownSummaries for change detection
+            // Populate tracker for existing messages to catch updates
             messages.forEach((msg, idx) => {
-                if (msg.extra && msg.extra.qvink_memory && msg.extra.qvink_memory.memory) {
-                    lastKnownSummaries.set(idx, msg.extra.qvink_memory.memory);
-                } else {
-                    lastKnownSummaries.set(idx, "");
-                }
+                lastKnownSummaries.set(idx, getSummaryFromMsg(msg));
             });
             return true;
         }
@@ -801,8 +810,7 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
                 points.push({ id: generateUUID(), vector: embeddings[i], payload: payload });
                 
                 // Track summary state
-                const summary = (message.extra && message.extra.qvink_memory && message.extra.qvink_memory.memory) ? message.extra.qvink_memory.memory : "";
-                lastKnownSummaries.set(messageIndex, summary);
+                lastKnownSummaries.set(messageIndex, getSummaryFromMsg(message));
 
                 if (points.length >= upsertBatchSize) {
                     await upsertVectors(collectionName, [...points]);
@@ -837,8 +845,7 @@ async function indexSingleMessage(message, chatIdHash, messageIndex, isGroupChat
         await upsertVectors(collectionName, [point]);
         
         // Track summary state
-        const summary = (message.extra && message.extra.qvink_memory && message.extra.qvink_memory.memory) ? message.extra.qvink_memory.memory : "";
-        lastKnownSummaries.set(messageIndex, summary);
+        lastKnownSummaries.set(messageIndex, getSummaryFromMsg(message));
         
         console.log('[' + MODULE_NAME + '] Indexed message ' + messageIndex);
         return true;
@@ -989,13 +996,10 @@ async function onChatLoaded() {
         else if (typeof getContext === 'function') context = getContext();
         if (context && context.chat) {
             lastMessageCount = context.chat.length;
-            // Initialize summaries map from loaded chat
+            // POPULATE SUMMARY TRACKER IMMEDIATELY ON LOAD
+            // This ensures we have a baseline to detect changes against
             context.chat.forEach((msg, idx) => {
-                if (msg.extra && msg.extra.qvink_memory && msg.extra.qvink_memory.memory) {
-                    lastKnownSummaries.set(idx, msg.extra.qvink_memory.memory);
-                } else {
-                    lastKnownSummaries.set(idx, "");
-                }
+                lastKnownSummaries.set(idx, getSummaryFromMsg(msg));
             });
         }
         if (chatId) {
@@ -1133,7 +1137,10 @@ async function startPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
     pollingInterval = setInterval(async () => {
         try {
+            // STOP if indexing is already busy (prevents database locking/race conditions)
+            if (isIndexing) return;
             if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
+            
             const chatId = getCurrentChatId();
             if (!chatId) return;
             let context = null;
@@ -1141,6 +1148,7 @@ async function startPolling() {
             else if (typeof getContext === 'function') context = getContext();
             if (!context?.chat) return;
             const isGroupChat = isCurrentChatGroupChat();
+            
             if (!currentChatIndexed) {
                 if (context.chat.length === 0) return;
                 await indexChat(convertChatToJSONL(context), chatId, isGroupChat);
@@ -1148,6 +1156,7 @@ async function startPolling() {
                 lastMessageCount = context.chat.length;
                 return;
             }
+            
             // Check for new messages
             if (context.chat.length > lastMessageCount) {
                 for (let i = lastMessageCount; i < context.chat.length; i++) {
@@ -1157,32 +1166,29 @@ async function startPolling() {
                 lastMessageCount = context.chat.length;
             }
             
-            // --- NEW: Check for Qvlink Summary Updates ---
-            // Iterate through the messages we know about and check if the summary metadata has changed.
-            // This catches when Qvlink updates old messages with new summaries in the background.
+            // --- Qvlink Summary Sync ---
             for (let i = 0; i < context.chat.length; i++) {
                 const msg = context.chat[i];
-                const currentSum = (msg.extra && msg.extra.qvink_memory && msg.extra.qvink_memory.memory) ? msg.extra.qvink_memory.memory : "";
+                const currentSum = getSummaryFromMsg(msg);
                 const knownSum = lastKnownSummaries.get(i);
                 
-                // If we have tracked this message but the summary is different (and not undefined)
+                // If tracked and changed
                 if (lastKnownSummaries.has(i) && currentSum !== knownSum) {
                     console.log('[' + MODULE_NAME + '] [Qvlink Sync] Summary changed for message ' + i + '. Re-indexing...');
                     updateUI('status', '↻ Syncing summary for msg #' + i);
-                    // Update our tracker immediately to prevent loop
-                    lastKnownSummaries.set(i, currentSum);
-                    // Re-index (upsert) the single message with the new summary content
+                    lastKnownSummaries.set(i, currentSum); // Update immediately
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
                     
-                    // Clear the status text after a brief moment
+                    // Reset UI after delay
                     setTimeout(() => {
                         const statusEl = document.getElementById('ragfordummies_status');
                         if (statusEl && statusEl.textContent.indexOf('Syncing summary') !== -1) {
                             statusEl.textContent = 'Ready';
                         }
                     }, 2000);
-                } else if (!lastKnownSummaries.has(i)) {
-                    // Initialize if missing from map (e.g. from a fresh load where we didn't index)
+                } 
+                // If not tracked yet (e.g. newly added by other logic)
+                else if (!lastKnownSummaries.has(i)) {
                     lastKnownSummaries.set(i, currentSum);
                 }
             }
@@ -1283,7 +1289,7 @@ function createSettingsUI() {
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
                     <div class="ragfordummies-section"><h4>Qdrant Configuration</h4><label><span>Local URL:</span><input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" placeholder="http://localhost:6333" /></label></div>
                     <div class="ragfordummies-section"><h4>Embedding Provider</h4><label><span>Provider:</span><select id="ragfordummies_embedding_provider"><option value="kobold" ${extensionSettings.embeddingProvider === 'kobold' ? 'selected' : ''}>KoboldCpp</option><option value="ollama" ${extensionSettings.embeddingProvider === 'ollama' ? 'selected' : ''}>Ollama</option><option value="openai" ${extensionSettings.embeddingProvider === 'openai' ? 'selected' : ''}>OpenAI</option></select></label><label id="ragfordummies_kobold_settings" style="${extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none'}"><span>KoboldCpp URL:</span><input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" placeholder="http://localhost:11434" /></label><div id="ragfordummies_ollama_settings" style="${extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none'}"><label><span>Ollama URL:</span><input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" placeholder="http://localhost:11434" /></label><label><span>Ollama Model:</span><input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" placeholder="nomic-embed-text" /></label></div><div id="ragfordummies_openai_settings" style="${extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none'}"><label><span>OpenAI API Key:</span><input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" placeholder="sk-..." /></label><label><span>OpenAI Model:</span><input type="text" id="ragfordummies_openai_model" value="${extensionSettings.openaiModel}" placeholder="text-embedding-3-small" /></label></div></div>
-                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /><small style="opacity:0.7; display:block; margin-top:5px;">Budget for injected context. Lower budget = less relevant context. (Bad).</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
+                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /><small style="opacity:0.7; display:block; margin-top:5px;">Budget for injected context. Lower budget = less context injected (least relevant information will be thrown away)</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
                     <div class="ragfordummies-section"><h4>Custom Keyword Blacklist</h4><label><span>Blacklisted Terms (comma-separated):</span><input type="text" id="ragfordummies_user_blacklist" value="${extensionSettings.userBlacklist || ''}" placeholder="baka, sweetheart, darling" /></label><small style="opacity:0.7; display:block; margin-top:5px;">Can be useful for things like pet names between you and your character appearing in the hybrid search. (Most likely not needed, as vector scoring takes care of this.) Do not touch unless you know what you're doing.</small></div>
                     <div class="ragfordummies-section"><h4>Context Injection Position</h4><label><span>Injection Position:</span><select id="ragfordummies_injection_position"><option value="before_main" ${extensionSettings.injectionPosition === 'before_main' ? 'selected' : ''}>Before Main Prompt</option><option value="after_main" ${extensionSettings.injectionPosition === 'after_main' ? 'selected' : ''}>After Main Prompt</option><option value="after_messages" ${extensionSettings.injectionPosition === 'after_messages' ? 'selected' : ''}>After X Messages</option></select></label><label id="ragfordummies_inject_after_messages_setting" style="${extensionSettings.injectionPosition === 'after_messages' ? '' : 'display:none'}"><span>Messages from End:</span><input type="number" id="ragfordummies_inject_after_messages" value="${extensionSettings.injectAfterMessages}" min="0" max="50" /><small style="opacity:0.7; display:block; margin-top:5px;">0 = at the very end, 3 = after last 3 messages</small></label></div>
                     <div class="ragfordummies-section"><h4>Manual Operations</h4><button id="ragfordummies_index_current" class="menu_button">Index Current Chat</button><button id="ragfordummies_force_reindex" class="menu_button">Force Re-index (Rebuild)</button><button id="ragfordummies_stop_indexing" class="menu_button ragfordummies-stop-btn">Stop Indexing</button><hr style="border-color: var(--SmartThemeBorderColor); margin: 10px 0;" /><label class="checkbox_label" style="margin-bottom: 8px;"><input type="checkbox" id="ragfordummies_merge_uploads" checked /><span>Merge uploads into current chat collection</span></label><button id="ragfordummies_upload_btn" class="menu_button">Upload File (JSONL or txt)</button><input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" /><div id="ragfordummies_status" class="ragfordummies-status">Ready</div></div>
