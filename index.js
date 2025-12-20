@@ -1171,17 +1171,23 @@ async function startPolling() {
                 return;
             }
             
-            // Check for new messages
-            if (context.chat.length > lastMessageCount) {
-                for (let i = lastMessageCount; i < context.chat.length; i++) {
-                    await indexSingleMessage(context.chat[i], chatId, i, isGroupChat);
-                    indexedMessageIds.add(i);
+            // 1. Check for NEW messages (Only if NOT using Event Source)
+            // If we have eventSource, that handles new messages. We don't want to double index.
+            if (!eventsRegistered) {
+                if (context.chat.length > lastMessageCount) {
+                    for (let i = lastMessageCount; i < context.chat.length; i++) {
+                        await indexSingleMessage(context.chat[i], chatId, i, isGroupChat);
+                        indexedMessageIds.add(i);
+                    }
+                    lastMessageCount = context.chat.length;
                 }
-                lastMessageCount = context.chat.length;
+            } else {
+                // Keep the count synced even if we rely on events, so the loop below works correctly
+                lastMessageCount = context.chat.length; 
             }
             
-            // --- Qvlink Summary Sync ---
-            // console.log('[' + MODULE_NAME + '] [DEBUG] Poller checking ' + context.chat.length + ' messages for summary updates...');
+            // 2. --- Qvlink Summary Sync ---
+            // This runs ALWAYS, because ST events don't fire for background metadata updates
             for (let i = 0; i < context.chat.length; i++) {
                 const msg = context.chat[i];
                 const currentSum = getSummaryFromMsg(msg);
@@ -1191,7 +1197,14 @@ async function startPolling() {
                 if (lastKnownSummaries.has(i) && currentSum !== knownSum) {
                     console.log('[' + MODULE_NAME + '] [Qvlink Sync] Summary changed for message ' + i + '. Re-indexing...');
                     updateUI('status', '↻ Syncing summary for msg #' + i);
-                    lastKnownSummaries.set(i, currentSum); // Update immediately
+                    
+                    lastKnownSummaries.set(i, currentSum); // Update immediately to prevent loops
+                    
+                    // CRITICAL FIX: Delete the old point first, otherwise we get duplicates because IDs are random UUIDs
+                    const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
+                    await deleteMessageByIndex(collectionName, chatId, i);
+                    
+                    // Re-index with new summary
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
                     
                     // Reset UI after delay
@@ -1329,7 +1342,7 @@ function attachEventListeners() {
                 else if (element.type === 'number') extensionSettings[key] = parseFloat(element.value) || 0;
                 else extensionSettings[key] = element.value;
                 if (id === 'auto_index') {
-                    if (element.checked && !eventsRegistered && !pollingInterval) startPolling();
+                    if (element.checked && !pollingInterval) startPolling();
                     else if (!element.checked && pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
                 }
                 saveSettings();
@@ -1499,13 +1512,17 @@ async function init() {
             eventSourceToUse.on('generate_before_combine_prompts', () => injectContextWithSetExtensionPrompt('normal'));
         }
         eventsRegistered = true;
-        usePolling = false;
+        // usePolling = false; <-- Removed this to allow summary sync in background
         console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
     } else {
         console.log('[' + MODULE_NAME + '] eventSource not available, using polling fallback');
         eventsRegistered = false;
         usePolling = true;
-        if (extensionSettings.autoIndex) await startPolling();
+    }
+
+    // Always start polling if autoIndex is on (handles summary sync + fallback message checks)
+    if (extensionSettings.autoIndex) {
+        await startPolling();
     }
 
     setTimeout(async () => {
