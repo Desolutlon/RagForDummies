@@ -133,7 +133,9 @@ const keywordBlacklist = new Set([
     'motherfucker', 'fucker', 'cunt', 'shitter', 'bullshit', 'asshat', 'fuckface', 'bastard', 'dick', 'cock', 'pussy', 'slut', 'whore', 'asshole', 'arse', 'prick', 'twat',
     'tonights', 'tomorrows', 'todays', 'tonight', 
     'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays',
-    'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers', 'leg', 'legs'
+    'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers',
+    // Artifacts from stripping contractions
+    'don', 'wasn', 'weren', 'isn', 'aren', 'didn', 'doesn', 'hasn', 'hadn', 'haven', 'wouldn', 'shouldn', 'couldn', 'mustn', 'shan', 'won', 've', 're', 'll', 's', 'm', 'd', 't', 'leg', 'legs'
 ]);
 
 // Helper function to get user-defined blacklist as a Set
@@ -153,7 +155,10 @@ function extractKeywords(text, excludeNames = new Set()) {
         return [];
     }
 
-    // --- STEP 1: PRE-CLEAN NLP ---
+    // --- STEP 1: NORMALIZE & PRE-CLEAN NLP ---
+    // Convert curly quotes to straight quotes so Compromise recognizes contractions
+    text = text.replace(/[\u2018\u2019`]/g, "'");
+
     // Run NLP on the raw text *before* stripping special chars.
     // This allows Compromise to see contractions (like "don't") correctly because the apostrophe is intact.
     let doc = window.nlp(text);
