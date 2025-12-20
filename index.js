@@ -141,7 +141,6 @@ const keywordBlacklist = new Set([
     'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays',
     'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers',
     'don', 'wasn', 'weren', 'isn', 'aren', 'didn', 'doesn', 'hasn', 'hadn', 'haven', 'wouldn', 'shouldn', 'couldn', 'mustn', 'shan', 'won', 've', 're', 'll', 's', 'm', 'd', 't',
-    // --- UPDATED BLACKLIST ITEMS ---
     'leg', 'legs', 'babe', 'baby', 'darling', 'honey', 'sweetheart', 'dear', 'love'
 ]);
 
@@ -155,6 +154,20 @@ function getUserBlacklistSet() {
             .map(t => t.trim())
             .filter(t => t.length > 0)
     );
+}
+
+// HELPER: Aggressively strips names (and possessives) from text
+function sanitizeTextForKeywords(text, namesSet) {
+    let cleanText = text;
+    const sortedNames = Array.from(namesSet).sort((a, b) => b.length - a.length);
+    if (sortedNames.length > 0) {
+        // Create regex to match names (whole word, case insensitive)
+        const pattern = '\\b(' + sortedNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b';
+        const nameRegex = new RegExp(pattern, 'gi');
+        cleanText = cleanText.replace(nameRegex, ' '); 
+    }
+    // Collapse double spaces created by removal
+    return cleanText.replace(/\s+/g, ' ').trim();
 }
 
 function extractKeywords(text, excludeNames = new Set()) {
@@ -277,59 +290,70 @@ function generateUUID() {
 function getParticipantNames(contextOrChat) {
     const names = new Set();
     let context = contextOrChat;
-    if (Array.isArray(contextOrChat)) {
+    
+    // Try to get global context if not provided
+    if (!context) {
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
             context = SillyTavern.getContext();
         } else if (typeof getContext === 'function') {
             context = getContext();
-        } else {
-            context = null;
+        }
+    } else if (Array.isArray(contextOrChat)) {
+        // If passed an array (chat history), try to grab global context for metadata anyway
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            context = SillyTavern.getContext();
         }
     }
-    
+
     if (context) {
-        if (context.name1) {
-            names.add(context.name1.toLowerCase());
-            const parts = context.name1.toLowerCase().split(/\s+/);
-            parts.forEach(p => { if (p.length >= 2) names.add(p); });
+        // 1. Primary Names (Context)
+        if (context.name1) names.add(context.name1.toLowerCase());
+        if (context.name2) names.add(context.name2.toLowerCase());
+        
+        // 2. User Name (explicitly checked from ST globals if available)
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.user_name) names.add(SillyTavern.user_name.toLowerCase());
+        
+        // 3. Current Character Nicknames/Data
+        if (context.characterId && typeof characters !== 'undefined' && characters[context.characterId]) {
+            const charData = characters[context.characterId].data;
+            if (charData && charData.nickname) {
+                names.add(charData.nickname.toLowerCase());
+            }
         }
-        if (context.name2) {
-            names.add(context.name2.toLowerCase());
-            const parts = context.name2.toLowerCase().split(/\s+/);
-            parts.forEach(p => { if (p.length >= 2) names.add(p); });
-        }
+
+        // 4. Group Members
         if (context.groups && context.groupId) {
             const group = context.groups.find(g => g.id === context.groupId);
             if (group && group.members) {
                 group.members.forEach(member => {
                     if (member && member.name) {
                         names.add(member.name.toLowerCase());
-                        const parts = member.name.toLowerCase().split(/\s+/);
-                        parts.forEach(p => { if (p.length >= 2) names.add(p); });
                     }
                 });
             }
         }
-        if (context.chat && Array.isArray(context.chat)) {
-            context.chat.forEach(msg => {
-                if (msg.name && typeof msg.name === 'string') {
-                    names.add(msg.name.toLowerCase());
-                    const parts = msg.name.toLowerCase().split(/\s+/);
-                    parts.forEach(p => { if (p.length >= 2) names.add(p); });
-                }
-            });
-        }
-    }
-    
-    if (Array.isArray(contextOrChat)) {
-        contextOrChat.forEach(msg => {
+        
+        // 5. Chat History Scan (Backup for name changes)
+        const chatLog = Array.isArray(contextOrChat) ? contextOrChat : (context.chat || []);
+        chatLog.forEach(msg => {
             if (msg.name && typeof msg.name === 'string') {
                 names.add(msg.name.toLowerCase());
-                const parts = msg.name.toLowerCase().split(/\s+/);
-                parts.forEach(p => { if (p.length >= 2) names.add(p); });
             }
         });
     }
+    
+    // Expand names (split First/Last)
+    // We use a temporary array to avoid infinite loop while adding to Set
+    const nameParts = [];
+    names.forEach(n => {
+        const parts = n.split(/\s+/);
+        if (parts.length > 1) {
+            parts.forEach(p => { 
+                if (p.length >= 2) nameParts.push(p); 
+            });
+        }
+    });
+    nameParts.forEach(p => names.add(p));
     
     return names;
 }
@@ -712,10 +736,16 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     
     // --- Normalize asterisk emphasis before keyword extraction ---
     const normalizedMessage = (message.mes || '').replace(/(\w)\*+(\w)/g, '$1 $2');
+
+    // --- AGGRESSIVE NAME STRIPPING FOR PAYLOAD GENERATION ---
+    // We create a "clean" version of the text that has NO names in it.
+    // This text is passed to the keyword extractors.
+    // This ensures that the "proper_nouns" field in the database NEVER contains names.
+    const textForKeywords = sanitizeTextForKeywords(normalizedMessage, participantNames);
     
     // --- The Unified Keyword Pipeline ---
-    const properNounCandidates = extractProperNouns(normalizedMessage, participantNames);
-    const commonKeywordCandidates = extractKeywords(normalizedMessage, participantNames);
+    const properNounCandidates = extractProperNouns(textForKeywords, participantNames);
+    const commonKeywordCandidates = extractKeywords(textForKeywords, participantNames);
 
     const allKeywords = new Set([...properNounCandidates, ...commonKeywordCandidates]);
     // --- End Pipeline ---
@@ -956,14 +986,8 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         // --- PATH B: KEYWORD FILTER (STRIPS NAMES) ---
         // We do NOT want to match simply because the name "Ryan" is in the text.
         // We explicitly strip the participant names from the text string BEFORE asking for keywords.
-        let textForKeywords = query;
-        const sortedNames = Array.from(participantNames).sort((a, b) => b.length - a.length);
-        if (sortedNames.length > 0) {
-            // Regex to match names (whole word, case insensitive)
-            const pattern = '\\b(' + sortedNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b';
-            const nameRegex = new RegExp(pattern, 'gi');
-            textForKeywords = textForKeywords.replace(nameRegex, ' '); // Replace with space
-        }
+        // This regex method is far more robust than simple word checking.
+        const textForKeywords = sanitizeTextForKeywords(query, participantNames);
         
         // Now extract terms from the sanitized text
         const queryFilterTerms = extractQueryFilterTerms(textForKeywords, participantNames);
