@@ -93,57 +93,59 @@ function extractKeywords(text, excludeNames = new Set()) {
 
     const wordsInText = text.split(/\s+/).length;
 
-    // REQUIREMENT: Only run on messages with 100+ words.
     if (wordsInText < 100) {
         return [];
     }
     
-    // --- Dynamic Limit Logic ---
     const baseKeywords = 5;
     const scalingFactor = 3;
     const additionalKeywords = Math.floor((wordsInText - 100) / 100) * scalingFactor;
     const limit = baseKeywords + additionalKeywords;
-    // ---------------------------
 
-    // A small, targeted blacklist for the most generic, low-value NOUNS and pronouns.
     const nounBlacklist = new Set([
         'thing', 'things', 'stuff', 'person', 'people', 'man', 'woman', 'men', 'women', 'guy', 'way', 'day', 'time', 'year', 'life',
         'part', 'world', 'case', 'friend', 'group', 'lot', 'number', 'end', 'place', 'work', 'hand', 'point', 'form', 'kind',
         'home', 'body', 'room', 'face', 'side', 'head', 'water', 'fact', 'name', 'story', 'problem', 'question', 'answer',
         'reason', 'idea', 'moment', 'bit', 'word', 'boy', 'girl', 'child', 'children',
         'something', 'anything', 'everything', 'nothing', 'someone', 'anyone', 'everyone', 'nobody',
-        // Specific pronoun contractions
         "i'd", "i'm", "i've"
     ]);
 
-    const doc = window.nlp(text);
     const finalKeywords = new Set();
+    const doc = window.nlp(text);
 
-    const processTerm = (term) => {
-        const cleaned = term.toLowerCase().replace(/'s$/, '').replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
-        
-        // Filter out junk, names, and blacklisted words
+    const processAndValidateTerm = (term) => {
+        const cleaned = term.toLowerCase()
+            .replace(/'s$/, '')
+            .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"']/g, "");
+
         if (
             cleaned.length > 2 &&
             !excludeNames.has(cleaned) &&
             !nounBlacklist.has(cleaned) &&
-            !(/\d/.test(cleaned) && /[a-zA-Z]/.test(cleaned)) // Exclude number-letter combos like "10am"
+            !(/\d/.test(cleaned))
         ) {
             finalKeywords.add(cleaned);
         }
     };
 
-    // 1. Get ONLY the nouns from the text.
-    doc.nouns().out('array').forEach(processTerm);
+    const topics = doc.topics().out('array');
+    for (const topic of topics) {
+        const words = topic.split(/\s+/);
+        for (const word of words) {
+            processAndValidateTerm(word);
+        }
+    }
     
-    // 2. Add explicit terms from quotations as a bonus signal.
     doc.quotations().out('array').forEach(quote => {
-        window.nlp(quote).terms().out('array').forEach(processTerm);
+        const quoteWords = quote.split(/\s+/);
+        for (const word of quoteWords) {
+            processAndValidateTerm(word);
+        }
     });
 
     return Array.from(finalKeywords).slice(0, limit);
 }
-
 
 function generateUUID() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
