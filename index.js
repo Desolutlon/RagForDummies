@@ -127,12 +127,13 @@ const keywordBlacklist = new Set([
     'finishes', 'finishing', 'finished', 'seems', 'seeming', 'seemed', 'appears', 'appearing', 'appeared', 'sounds', 'sounding', 'sounded', 'tone', 'voice',
     'expression', 'face', 'eyes', 'head', 'body', 'arm', 'arms', 'hand', 'hands', 'finger', 'fingers', 'teasing', 'teased', 'smug', 'smugly',
     'playful', 'playfully', 'curious', 'curiously', 'nervous', 'nervously', 'soft', 'warm', 'cold', 'hot', 'light', 'dark', 'bright', 'quiet', 'loud', 'gentle',
-    'rough', 'slight', 'slightly', 'brief', 'briefly', 'quick', 'slow', 'sudden', 'careful', 'carefully',
-    // Our new additions
+    'rough', 'slight', 'slightly', 'brief', 'briefly', 'quick', 'slow', 'sudden', 'careful', 'carefully', 'tonight', 'yesterdays', 'todays', 'tomorrows', 'tonights'
+    'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays',
+    // some pronouns ig
     "we've", "you're", "he's", "she's", "it's", "they're",
     'yourself', 'worry', 'mr', 'mrs', 'sir', 'maam',
-    // Swear words
-    'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'bitch', 'dumbass'
+    // swear words n shit lol
+    'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'bitch', 'dumbass', 'motherfucker', 'fucker', 'cunt', 'shitter'
 ]);
 
 // Helper function to get user-defined blacklist as a Set
