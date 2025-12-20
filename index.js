@@ -55,6 +55,7 @@ const defaultSettings = {
     openaiApiKey: '',
     openaiModel: 'text-embedding-3-small',
     retrievalCount: 5,
+    maxContextBudget: 4000, // Character limit for injected context
     similarityThreshold: 0.7,
     autoIndex: true,
     injectContext: true,
@@ -130,11 +131,10 @@ const keywordBlacklist = new Set([
     "we've", "you're", "he's", "she's", "it's", "they're",
     'yourself', 'worry', 'mr', 'mrs', 'sir', 'maam', 'hmph',
     'fuck', 'fucking', 'fucked', 'shit', 'shitty', 'damn', 'damned', 'hell', 'ass', 'crap', 'crappy', 'bitch', 'dumbass',
-    'motherfucker', 'fucker', 'cunt', 'shitter', 'bullshit', 'asshat', 'fuckface', 'bastard', 'dick', 'cock', 'pussy', 'slut', 'whore', 'asshole', 'arse', 'prick', 'twat', 'goddamn',
+    'motherfucker', 'fucker', 'cunt', 'shitter', 'bullshit', 'asshat', 'fuckface', 'bastard', 'dick', 'cock', 'pussy', 'slut', 'whore', 'asshole', 'arse', 'prick', 'twat',
     'tonights', 'tomorrows', 'todays', 'tonight', 
     'saturdays', 'sundays', 'mondays', 'tuesdays', 'wednesdays', 'thursdays', 'fridays',
     'januarys', 'februarys', 'marchs', 'aprils', 'mays', 'junes', 'julys', 'augusts', 'septembers', 'octobers', 'novembers', 'decembers',
-    // Artifacts from stripping contractions
     'don', 'wasn', 'weren', 'isn', 'aren', 'didn', 'doesn', 'hasn', 'hadn', 'haven', 'wouldn', 'shouldn', 'couldn', 'mustn', 'shan', 'won', 've', 're', 'll', 's', 'm', 'd', 't', 'leg', 'legs'
 ]);
 
@@ -888,15 +888,34 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         
         console.log('[' + MODULE_NAME + '] Retrieved ' + filteredByPresence.length + ' messages with scores:', filteredByPresence.map(r => r.score.toFixed(3)).join(', '));
         
-        const contextParts = filteredByPresence.map(result => {
+        // --- CONTEXT BUDGETING ---
+        let currentTotalChars = 0;
+        const contextParts = [];
+        const budget = extensionSettings.maxContextBudget || 4000;
+        let budgetHit = false;
+
+        // Results are already sorted by score (Descending) from searchVectors
+        for (const result of filteredByPresence) {
             const p = result.payload;
             const score = result.score;
             let text = `\n[Character: ${p.character_name}]\n[Time: ${p.timestamp}]\n[Relevance Score: ${score.toFixed(3)} (${result._source || 'unknown'})]`;
             if (p.summary) text += `\n\nSummary: ${p.summary}`;
             text += `\n\nFull Message: ${p.full_message}`;
-            return text;
-        });
-        
+
+            if (currentTotalChars + text.length > budget) {
+                budgetHit = true;
+                console.log('[' + MODULE_NAME + '] Context budget hit! Stopping addition of lower-scoring results.');
+                break;
+            }
+
+            contextParts.push(text);
+            currentTotalChars += text.length;
+        }
+
+        if (budgetHit) {
+            updateUI('status', '⚠️ Budget Limit Hit (' + currentTotalChars + '/' + budget + ' chars)');
+        }
+
         const contextString = '\n\n========== RELEVANT PAST CONTEXT FROM RAG ==========\n' + contextParts.join('\n\n-------------------\n') + '\n\n========== END RAG CONTEXT ==========\n\n';
         console.log('[' + MODULE_NAME + '] Formatted context with full metadata (' + contextString.length + ' chars)');
         return contextString;
@@ -1209,7 +1228,7 @@ function createSettingsUI() {
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
                     <div class="ragfordummies-section"><h4>Qdrant Configuration</h4><label><span>Local URL:</span><input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" placeholder="http://localhost:6333" /></label></div>
                     <div class="ragfordummies-section"><h4>Embedding Provider</h4><label><span>Provider:</span><select id="ragfordummies_embedding_provider"><option value="kobold" ${extensionSettings.embeddingProvider === 'kobold' ? 'selected' : ''}>KoboldCpp</option><option value="ollama" ${extensionSettings.embeddingProvider === 'ollama' ? 'selected' : ''}>Ollama</option><option value="openai" ${extensionSettings.embeddingProvider === 'openai' ? 'selected' : ''}>OpenAI</option></select></label><label id="ragfordummies_kobold_settings" style="${extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none'}"><span>KoboldCpp URL:</span><input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" placeholder="http://localhost:11434" /></label><div id="ragfordummies_ollama_settings" style="${extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none'}"><label><span>Ollama URL:</span><input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" placeholder="http://localhost:11434" /></label><label><span>Ollama Model:</span><input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" placeholder="nomic-embed-text" /></label></div><div id="ragfordummies_openai_settings" style="${extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none'}"><label><span>OpenAI API Key:</span><input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" placeholder="sk-..." /></label><label><span>OpenAI Model:</span><input type="text" id="ragfordummies_openai_model" value="${extensionSettings.openaiModel}" placeholder="text-embedding-3-small" /></label></div></div>
-                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
+                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Context Budget (Characters):</span><input type="number" id="ragfordummies_max_context_budget" value="${extensionSettings.maxContextBudget || 4000}" min="500" max="20000" /><small style="opacity:0.7; display:block; margin-top:5px;">Limits how much RAG text is inserted. If full, lower-scoring results are dropped to fit.</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
                     <div class="ragfordummies-section"><h4>Custom Keyword Blacklist</h4><label><span>Blacklisted Terms (comma-separated):</span><input type="text" id="ragfordummies_user_blacklist" value="${extensionSettings.userBlacklist || ''}" placeholder="baka, sweetheart, darling" /></label><small style="opacity:0.7; display:block; margin-top:5px;">Can be useful for things like pet names between you and your character appearing in the hybrid search. (Most likely not needed, as vector scoring takes care of this.) Do not touch unless you know what you're doing.</small></div>
                     <div class="ragfordummies-section"><h4>Context Injection Position</h4><label><span>Injection Position:</span><select id="ragfordummies_injection_position"><option value="before_main" ${extensionSettings.injectionPosition === 'before_main' ? 'selected' : ''}>Before Main Prompt</option><option value="after_main" ${extensionSettings.injectionPosition === 'after_main' ? 'selected' : ''}>After Main Prompt</option><option value="after_messages" ${extensionSettings.injectionPosition === 'after_messages' ? 'selected' : ''}>After X Messages</option></select></label><label id="ragfordummies_inject_after_messages_setting" style="${extensionSettings.injectionPosition === 'after_messages' ? '' : 'display:none'}"><span>Messages from End:</span><input type="number" id="ragfordummies_inject_after_messages" value="${extensionSettings.injectAfterMessages}" min="0" max="50" /><small style="opacity:0.7; display:block; margin-top:5px;">0 = at the very end, 3 = after last 3 messages</small></label></div>
                     <div class="ragfordummies-section"><h4>Manual Operations</h4><button id="ragfordummies_index_current" class="menu_button">Index Current Chat</button><button id="ragfordummies_force_reindex" class="menu_button">Force Re-index (Rebuild)</button><button id="ragfordummies_stop_indexing" class="menu_button ragfordummies-stop-btn">Stop Indexing</button><hr style="border-color: var(--SmartThemeBorderColor); margin: 10px 0;" /><label class="checkbox_label" style="margin-bottom: 8px;"><input type="checkbox" id="ragfordummies_merge_uploads" checked /><span>Merge uploads into current chat collection</span></label><button id="ragfordummies_upload_btn" class="menu_button">Upload File (JSONL or txt)</button><input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" /><div id="ragfordummies_status" class="ragfordummies-status">Ready</div></div>
@@ -1222,7 +1241,8 @@ function attachEventListeners() {
     const settingIds = [
         'enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
         'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'auto_index', 
-        'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist'
+        'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
+        'max_context_budget'
     ];
     settingIds.forEach(id => {
         const element = document.getElementById('ragfordummies_' + id);
