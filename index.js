@@ -1363,4 +1363,4 @@ async function init() {
     updateUI('status', 'Extension loaded');
 }
 
-jQuery(
+jQuery(async function() { setTimeout(init, 100); });
