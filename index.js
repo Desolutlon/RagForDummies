@@ -1569,14 +1569,39 @@ const tracker_onReplyProcessed = (data) => {
             
             console.log(`[${MODULE_NAME}] [TRACKER] State Updated via JSON`);
             
-            // Generate the HTML Grid Header
+            // Remove the JSON block from the message text
+            data.text = rawMsg.replace(regex, "").trim();
+            
+            // If the AI didn't write anything after the block, add a note
+            if (data.text.length === 0) {
+                data.text = "(AI failed to generate dialogue. Please regenerate.)";
+            }
+            
+            // Generate and inject the tracker HTML if inline display is enabled
             if (extensionSettings.trackerInline) {
-                const s = window.RagTrackerState;
-                const renderArr = (arr) => arr.length ? arr.join(', ') : 'None';
-                
-                // --- GRID LAYOUT (Floats inside top of message) ---
-                const html = `
-<div class="ft-inline-container">
+                // Store the tracker HTML to be injected via DOM manipulation
+                // We'll use a setTimeout to ensure the message exists in the DOM first
+                setTimeout(() => {
+                    injectTrackerDisplay(parsedData);
+                }, 100);
+            }
+        } catch (e) {
+            console.error(`[${MODULE_NAME}] [TRACKER] Failed to parse JSON:`, e);
+            // Fallback: Just remove the block if it failed to parse
+            data.text = rawMsg.replace(regex, "").trim();
+        }
+    }
+    return data;
+};
+
+// NEW FUNCTION: Inject tracker display above the latest message
+function injectTrackerDisplay(trackerData) {
+    const s = window.RagTrackerState;
+    const renderArr = (arr) => arr.length ? arr.join(', ') : 'None';
+    
+    // Generate the tracker HTML
+    const trackerHtml = `
+<div class="ft-tracker-display" data-tracker="true">
     <div class="ft-grid">
         <div class="ft-cell full-width">
             <div class="ft-label">Time & Date</div>
@@ -1640,30 +1665,106 @@ const tracker_onReplyProcessed = (data) => {
         </div>
     </div>
 </div>`;
-                
-                // Remove the JSON block from the text
-                let cleanText = rawMsg.replace(regex, "").trim();
-                
-                // If the AI didn't write anything after the block, we just show the block
-                // But ideally the prompt update fixes this.
-                if (cleanText.length === 0) {
-                     cleanText = "(AI failed to generate dialogue. Please regenerate.)";
-                }
 
-                data.text = html + "\n" + cleanText;
-
-            } else {
-                // Just remove the block if inline is disabled
-                data.text = rawMsg.replace(regex, "").trim();
-            }
-        } catch (e) {
-            console.error(`[${MODULE_NAME}] [TRACKER] Failed to parse JSON:`, e);
-            // Fallback: Just remove the block if it failed to parse
-            data.text = rawMsg.replace(regex, "").trim();
+    // Find the most recent character message (not user message)
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer) {
+        console.warn('[' + MODULE_NAME + '] Could not find chat container');
+        return;
+    }
+    
+    // Get all message blocks
+    const messages = chatContainer.querySelectorAll('.mes');
+    if (messages.length === 0) return;
+    
+    // Find the last non-user message
+    let targetMessage = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        // Check if it's a character message (not user message)
+        if (!msg.classList.contains('user')) {
+            targetMessage = msg;
+            break;
         }
     }
-    return data;
-};
+    
+    if (!targetMessage) {
+        console.warn('[' + MODULE_NAME + '] Could not find target message for tracker display');
+        return;
+    }
+    
+    // Remove any existing tracker display from this message
+    const existingTracker = targetMessage.querySelector('.ft-tracker-display');
+    if (existingTracker) {
+        existingTracker.remove();
+    }
+    
+    // Insert the tracker HTML at the beginning of the message
+    targetMessage.insertAdjacentHTML('afterbegin', trackerHtml);
+    console.log('[' + MODULE_NAME + '] Tracker display injected successfully');
+}
+
+// Update the CSS to work with the new structure
+function injectTrackerCSS() {
+    const styleId = 'rag-tracker-styles';
+    if (document.getElementById(styleId)) return;
+
+    const css = `
+        /* The Tracker Display Container - Appears ABOVE message content */
+        .ft-tracker-display {
+            display: block;
+            margin: 0 0 15px 0;
+            width: 100%;
+            background-color: rgba(20, 20, 20, 0.6);
+            border: 2px solid var(--SmartThemeBorderColor);
+            border-radius: 8px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 0.75em;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        }
+        
+        .ft-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1px;
+            background-color: rgba(255,255,255,0.1); /* Lines between cells */
+        }
+
+        .ft-cell {
+            background-color: var(--SmartThemeChatTintColor, #1e1e1e);
+            padding: 5px 10px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .ft-cell.full-width {
+            grid-column: span 2;
+        }
+
+        .ft-label {
+            text-transform: uppercase;
+            font-weight: 700;
+            font-size: 0.85em;
+            opacity: 0.6;
+            margin-bottom: 2px;
+            letter-spacing: 0.5px;
+        }
+        
+        .ft-val {
+            font-weight: 500;
+            color: var(--SmartThemeBodyColor);
+            line-height: 1.3;
+        }
+    `;
+
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = css;
+    document.head.appendChild(style);
+}
+
 
 // ===========================
 // UI Functions
