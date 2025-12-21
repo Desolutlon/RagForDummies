@@ -2295,21 +2295,32 @@ async function init() {
     $('#extensions_settings').append(settingsHtml);
 
     $('#ragfordummies_container > .inline-drawer-toggle').on('click', function(e) {
-        e.preventDefault(); e.stopPropagation();
+        e.preventDefault();
+        e.stopPropagation();
         $(this).find('.inline-drawer-icon').toggleClass('down up');
         $('#ragfordummies_container .inline-drawer-content').first().slideToggle(200);
     });
+
     $('#rag_tracker_drawer > .inline-drawer-toggle').on('click', function(e) {
-        e.preventDefault(); e.stopPropagation();
+        e.preventDefault();
+        e.stopPropagation();
         $(this).find('.inline-drawer-icon').toggleClass('down up');
         $(this).next('.inline-drawer-content').slideToggle(200);
     });
 
     attachEventListeners();
 
+    // Ensure tracker clock is initialized immediately so UI does not show Unknown
+    if (extensionSettings.trackerEnabled) {
+        window.RagTrackerState.initClockFromSettingsAndChat();
+        tracker_updateSettingsDebug();
+    }
+
     let eventSourceToUse = null;
     if (typeof eventSource !== 'undefined') eventSourceToUse = eventSource;
-    else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.().eventSource) eventSourceToUse = SillyTavern.getContext().eventSource;
+    else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.().eventSource) {
+        eventSourceToUse = SillyTavern.getContext().eventSource;
+    }
 
     if (eventSourceToUse) {
         console.log('[' + MODULE_NAME + '] Registering event listeners on eventSource');
@@ -2322,8 +2333,8 @@ async function init() {
 
         if (typeof injectContextWithSetExtensionPrompt === 'function') {
             const injectionHandler = (type) => {
-                injectContextWithSetExtensionPrompt(type || 'normal'); // RAG
-                tracker_injectInstruction();                           // TRACKER
+                injectContextWithSetExtensionPrompt(type || 'normal');
+                tracker_injectInstruction();
             };
             eventSourceToUse.on('GENERATION_AFTER_COMMANDS', injectionHandler);
             eventSourceToUse.on('generate_before_combine_prompts', () => injectionHandler('normal'));
@@ -2347,6 +2358,31 @@ async function init() {
     if (extensionSettings.autoIndex) {
         await startPolling();
     }
+
+    setTimeout(async () => {
+        console.log('[' + MODULE_NAME + '] Running initial index status check...');
+        const chatId = getCurrentChatId();
+        if (chatId && !currentChatIndexed) {
+            const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
+            try {
+                const pointCount = await countPoints(collectionName);
+                if (pointCount > 0) {
+                    currentChatIndexed = true;
+                    updateUI('status', '✓ Indexed (' + pointCount + ' messages)');
+                } else {
+                    updateUI('status', 'Ready to index');
+                }
+            } catch (checkError) {
+                console.log('[' + MODULE_NAME + '] Initial check: Could not verify collection -', checkError.message);
+            }
+        }
+    }, 500);
+
+    tracker_updateSettingsDebug();
+
+    console.log('[' + MODULE_NAME + '] Extension loaded successfully');
+    updateUI('status', 'Extension loaded');
+}
 
     setTimeout(async () => {
         console.log('[' + MODULE_NAME + '] Running initial index status check...');
