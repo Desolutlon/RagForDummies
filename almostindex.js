@@ -1459,26 +1459,29 @@ async function onChatLoaded() {
     const chatId = getCurrentChatId();
     lastChatId = chatId;
 
-    // Reset snapshots per chat
     window.FuckTrackerSnapshots.byMesId = Object.create(null);
     window.FuckTrackerSnapshots.pending = [];
 
-    // Init tracker clock for this chat
-    window.RagTrackerState.initClockFromSettingsAndChat();
-    tracker_updateSettingsDebug();
+    if (extensionSettings.trackerEnabled) {
+        window.RagTrackerState.initClockFromSettingsAndChat();
+        tracker_updateSettingsDebug();
+    }
 
     console.log('[' + MODULE_NAME + '] Chat loaded. Chat ID:', chatId);
     updateUI('status', 'Chat loaded - checking index...');
+
     try {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
         else if (typeof getContext === 'function') context = getContext();
+
         if (context && context.chat) {
             lastMessageCount = context.chat.length;
             context.chat.forEach((msg, idx) => {
                 lastKnownSummaries.set(idx, getSummaryFromMsg(msg));
             });
         }
+
         if (chatId) {
             const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
             const pointCount = await countPoints(collectionName);
