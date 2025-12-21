@@ -1,5 +1,5 @@
 /**
- * RagForDummies + FuckTracker Integration (Final Merged Version with DOM Injection)
+ * RagForDummies + FuckTracker Integration (Final Merged Version with DOM Injection + Dynamic Tracker Fields)
  * A RAG extension for SillyTavern that actually works + Zero Latency State Tracking
  */
 
@@ -37,7 +37,9 @@ const MODULE_LOG_ALLOW_SUBSTR = [
     'Summary changed',
     'Qvlink Sync',
     'State Updated',
-    'Prompt Injected'
+    'Prompt Injected',
+    'Injected tracker header',
+    'Snapshot'
 ];
 
 const __origConsoleLog = console.log.bind(console);
@@ -54,47 +56,150 @@ console.log = function(...args) {
 };
 
 // =================================================================
-// 1. GLOBAL TRACKER STATE (FuckTracker Engine V2 - JSON)
+// 1. GLOBAL TRACKER STATE (FuckTracker Engine V3 - JS clock + dynamic fields)
 // =================================================================
-window.RagTrackerState = {
-    time: "Unknown",
-    location: "Unknown",
-    outfit: [],
-    dressState: "Normal",
-    action: "Standing",
-    topic: "None",
-    tone: "Neutral",
-    present: [],
-    cash: "Unknown",
-    income: "Unknown",
-    intoxication: "Sober",
-    hunger: "Satiated",
-    excretion: "None",
-    weather: "Unknown",
 
-    // Update state from the parsed JSON block
+/**
+ * IMPORTANT:
+ * - Time/Date is computed by JS per assistant message (AI output ignored).
+ * - Location + Topic are required (AI-provided, used for hybrid search).
+ * - Everything else is user-defined fields (titles) returned by the AI JSON.
+ */
+window.RagTrackerState = {
+    // Computed time (NOT AI-guided)
+    _clockMs: null, // epoch ms
+    time: "Unknown",
+
+    // Required fields (AI)
+    location: "Unknown",
+    topic: "None",
+
+    // Optional convenience (still used by older UI/debug + potential user field)
+    tone: "Neutral",
+
+    // Dynamic fields store (everything else)
+    fields: {},
+
+    initClockFromSettingsAndChat: function() {
+        const start = extensionSettings.trackerStartDate;
+        const stepMin = extensionSettings.trackerTimeStep || 15;
+
+        let startMs = Date.parse(start);
+        if (!Number.isFinite(startMs)) {
+            const d = new Date();
+            d.setHours(8, 0, 0, 0);
+            startMs = d.getTime();
+        }
+
+        // advance based on existing assistant messages (stable on reload)
+        let ctx = null;
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ctx = SillyTavern.getContext();
+        else if (typeof getContext === 'function') ctx = getContext();
+
+        let assistantCount = 0;
+        const chat = ctx?.chat || [];
+        for (const m of chat) {
+            if (!m || m.is_system) continue;
+            if (m.is_user) continue;
+            assistantCount++;
+        }
+
+        this._clockMs = startMs + assistantCount * stepMin * 60_000;
+        this.time = this.formatClock(this._clockMs);
+    },
+
+    formatClock: function(ms) {
+        if (!Number.isFinite(ms)) return "Unknown";
+        const d = new Date(ms);
+        const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+        const dayName = dayNames[d.getDay()];
+
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        const yyyy = String(d.getFullYear());
+
+        let hours = d.getHours();
+        const minutes = String(d.getMinutes()).padStart(2, '0');
+        const isPm = hours >= 12;
+        const suffix = isPm ? "p.m" : "a.m";
+        hours = hours % 12;
+        if (hours === 0) hours = 12;
+
+        return `${hours}:${minutes} ${suffix}; ${mm}/${dd}/${yyyy} (${dayName})`;
+    },
+
+    advanceClock: function() {
+        const stepMin = extensionSettings.trackerTimeStep || 15;
+        if (!Number.isFinite(this._clockMs)) {
+            this.initClockFromSettingsAndChat();
+            return;
+        }
+        this._clockMs += stepMin * 60_000;
+        this.time = this.formatClock(this._clockMs);
+    },
+
+    // Applies parsed JSON to state (ignores AI time/date)
     updateFromJSON: function(data) {
-        if (!data) return;
-        if (data.Time) this.time = data.Time;
-        if (data.Location) this.location = data.Location;
-        if (data.Weather) this.weather = data.Weather;
-        if (data.Outfit) this.outfit = Array.isArray(data.Outfit) ? data.Outfit : [data.Outfit];
-        if (data.StateOfDress) this.dressState = data.StateOfDress;
-        if (data.CurrentAction) this.action = data.CurrentAction;
-        if (data.Topic) this.topic = data.Topic;
-        if (data.Tone) this.tone = data.Tone;
-        if (data.CharactersPresent) this.present = Array.isArray(data.CharactersPresent) ? data.CharactersPresent : [data.CharactersPresent];
-        if (data.Cash) this.cash = data.Cash;
-        if (data.Income) this.income = data.Income;
-        if (data.Intoxication) this.intoxication = data.Intoxication;
-        if (data.HungerThirst) this.hunger = data.HungerThirst;
-        if (data.Excretion) this.excretion = data.Excretion;
-        
+        if (!data || typeof data !== 'object') return;
+
+        if (typeof data.Location === 'string' && data.Location.trim()) this.location = data.Location.trim();
+        if (typeof data.Topic === 'string' && data.Topic.trim()) this.topic = data.Topic.trim();
+
+        if (typeof data.Tone === 'string' && data.Tone.trim()) this.tone = data.Tone.trim();
+
+        // Dynamic: store everything except forbidden keys (AI must not guide time)
+        const forbidden = new Set(["Time", "Date", "Datetime", "Day", "Clock"]);
+        for (const [k, v] of Object.entries(data)) {
+            if (forbidden.has(k)) continue;
+            this.fields[k] = v;
+        }
+
         tracker_updateSettingsDebug();
     },
-    
+
     getFormattedDate: function() { return this.time; }
 };
+
+// Per-message snapshots so old messages don't show latest state
+window.FuckTrackerSnapshots = {
+    byMesId: Object.create(null),
+    pending: [], // fallback if mesid isn't available at processing time
+};
+
+function ft_getMesIdFromEventArg(arg) {
+    if (arg == null) return null;
+    if (typeof arg === 'number' || typeof arg === 'string') return arg;
+
+    if (typeof arg === 'object') {
+        if (arg.mesid != null) return arg.mesid;
+        if (arg.mesId != null) return arg.mesId;
+        if (arg.messageId != null) return arg.messageId;
+        if (arg.id != null) return arg.id;
+    }
+    return null;
+}
+
+function ft_escapeHtml(v) {
+    return String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function ft_renderValue(v) {
+    if (Array.isArray(v)) return v.join(', ');
+    if (v && typeof v === 'object') return JSON.stringify(v);
+    if (v === null || v === undefined) return 'None';
+    return String(v);
+}
+
+function ft_findMesElementByMesId(mesId) {
+    const id = String(mesId);
+    return document.querySelector(`#chat .mes[mesid="${CSS.escape(id)}"]`)
+        || document.querySelector(`.mes[mesid="${CSS.escape(id)}"]`);
+}
 
 // Extension settings with defaults
 const defaultSettings = {
@@ -108,21 +213,67 @@ const defaultSettings = {
     openaiModel: 'text-embedding-3-small',
     retrievalCount: 5,
     similarityThreshold: 0.7,
-    maxTokenBudget: 1000, 
-    queryMessageCount: 3, 
+    maxTokenBudget: 1000,
+    queryMessageCount: 3,
     autoIndex: true,
     injectContext: true,
     injectionPosition: 'after_main',
     injectAfterMessages: 3,
     excludeLastMessages: 2,
     userBlacklist: '',
-    
+
     // --- FUCK TRACKER SETTINGS ---
     trackerEnabled: true,
-    trackerInline: true, // Show box in chat
+    trackerInline: true,
     trackerTimeStep: 15,
-    trackerContextDepth: 10, // How many messages to read for inference
-    trackerStartDate: new Date().toISOString().split('T')[0] + "T08:00" // Default to today 8am
+    trackerContextDepth: 10,
+    trackerStartDate: new Date().toISOString().split('T')[0] + "T08:00",
+
+    // NEW: user-configurable fields (Location/Topic required + locked)
+    trackerFields: [
+        {
+            title: "Location",
+            prompt: "Provide the current specific location in the format: Specific Place, Building, City, State.",
+            examples: `["The Green Mill Lounge, Uptown, Chicago, Illinois"]`,
+            locked: true,
+            required: true,
+        },
+        {
+            title: "Topic",
+            prompt: "Provide a one- or two-word description of the main activity/event/subject driving the current scene's focus. Be specific and concise.",
+            examples: `["Working Out"]`,
+            locked: true,
+            required: true,
+        },
+        {
+            title: "Tone",
+            prompt: "Describe the emotional tone in 1–3 words.",
+            examples: `["Tense", "Playful"]`,
+            locked: false,
+            required: false,
+        },
+        {
+            title: "CharactersPresent",
+            prompt: "Array of active participants' nicknames. Put {{user}} first if present. Only active participants.",
+            examples: `["{{user}}", "Al Capone"]`,
+            locked: false,
+            required: false,
+        },
+        {
+            title: "CurrentAction",
+            prompt: "Short description of posture + interaction (e.g., 'Standing at podium').",
+            examples: `["Sitting at the desk, smoking a cigar"]`,
+            locked: false,
+            required: false,
+        },
+        {
+            title: "Weather",
+            prompt: "Scientific style (Temp C, wind, clouds). Match environment/time.",
+            examples: `["22°C, light wind, overcast"]`,
+            locked: false,
+            required: false,
+        },
+    ],
 };
 
 let extensionSettings = { ...defaultSettings };
@@ -133,7 +284,7 @@ let lastMessageCount = 0;
 let lastChatId = null;
 let pollingInterval = null;
 let indexedMessageIds = new Set();
-let lastKnownSummaries = new Map(); 
+let lastKnownSummaries = new Map();
 let usePolling = false;
 let eventsRegistered = false;
 let lastInjectionTime = 0;
@@ -147,10 +298,9 @@ function injectTrackerCSS() {
     if (document.getElementById(styleId)) return;
 
     const css = `
-        /* The Tracker Display Container - Appears ABOVE message content */
         .ft-tracker-display {
             display: block;
-            margin: 0 0 15px 0;
+            margin: 0 0 12px 0;
             width: 100%;
             background-color: rgba(20, 20, 20, 0.6);
             border: 2px solid var(--SmartThemeBorderColor);
@@ -160,12 +310,12 @@ function injectTrackerCSS() {
             overflow: hidden;
             box-shadow: 0 4px 6px rgba(0,0,0,0.2);
         }
-        
+
         .ft-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
             gap: 1px;
-            background-color: rgba(255,255,255,0.1); /* Lines between cells */
+            background-color: rgba(255,255,255,0.1);
         }
 
         .ft-cell {
@@ -188,7 +338,7 @@ function injectTrackerCSS() {
             margin-bottom: 2px;
             letter-spacing: 0.5px;
         }
-        
+
         .ft-val {
             font-weight: 500;
             color: var(--SmartThemeBodyColor);
@@ -202,23 +352,87 @@ function injectTrackerCSS() {
     document.head.appendChild(style);
 }
 
-
 // ===========================
 // TRACKER LOGIC
 // ===========================
 
 function tracker_initDate() {
-    // Legacy support, Date is now largely handled by LLM Hallucination/Logic
+    // Time/Date is now JS-driven via RagTrackerState.initClockFromSettingsAndChat()
 }
 
 function tracker_updateSettingsDebug() {
-    // Syncs the settings menu inputs with real state
     const s = window.RagTrackerState;
-    $('#ft_debug_time').html(`
-        <b>Time:</b> ${s.time}<br>
-        <b>Loc:</b> ${s.location}<br>
-        <b>Act:</b> ${s.action}
-    `);
+    const el = document.getElementById('ft_debug_time');
+    if (!el) return;
+
+    el.innerHTML = `
+        <b>Time:</b> ${ft_escapeHtml(s.time)}<br>
+        <b>Loc:</b> ${ft_escapeHtml(s.location)}<br>
+        <b>Topic:</b> ${ft_escapeHtml(s.topic)}
+    `;
+}
+
+function ft_ensureRequiredFields() {
+    let fields = Array.isArray(extensionSettings.trackerFields) ? extensionSettings.trackerFields : [];
+    const hasLocation = fields.some(f => f?.title === "Location");
+    const hasTopic = fields.some(f => f?.title === "Topic");
+
+    if (!hasLocation) {
+        fields.unshift({
+            title: "Location",
+            prompt: "Provide the current specific location in the format: Specific Place, Building, City, State.",
+            examples: `["The Green Mill Lounge, Uptown, Chicago, Illinois"]`,
+            locked: true,
+            required: true,
+        });
+    }
+    if (!hasTopic) {
+        fields.splice(1, 0, {
+            title: "Topic",
+            prompt: "Provide a one- or two-word description of the main activity/event/subject driving the current scene's focus. Be specific and concise.",
+            examples: `["Working Out"]`,
+            locked: true,
+            required: true,
+        });
+    }
+
+    // Ensure required are locked
+    fields = fields.map(f => {
+        if (f?.title === "Location" || f?.title === "Topic") {
+            return { ...f, locked: true, required: true };
+        }
+        return f;
+    });
+
+    extensionSettings.trackerFields = fields;
+}
+
+function ft_renderFieldsUI() {
+    const container = document.getElementById('ft_fields_container');
+    if (!container) return;
+
+    const fields = Array.isArray(extensionSettings.trackerFields) ? extensionSettings.trackerFields : [];
+    container.innerHTML = '';
+
+    fields.forEach((f, idx) => {
+        const title = f?.title ?? '';
+        const prompt = f?.prompt ?? '';
+        const examples = f?.examples ?? '';
+        const locked = !!f?.locked;
+
+        const row = document.createElement('div');
+        row.className = 'ft-field-row';
+        row.style.cssText = 'display:grid; grid-template-columns: 1fr 2fr 2fr auto; gap:6px; margin-bottom:6px; align-items:start;';
+
+        row.innerHTML = `
+          <input class="text_pole ft-field-title" data-idx="${idx}" placeholder="Title (e.g., Mood)" value="${ft_escapeHtml(title)}" ${locked ? 'disabled' : ''} />
+          <textarea class="text_pole ft-field-prompt" data-idx="${idx}" rows="2" placeholder="Prompt for this field" ${locked ? 'disabled' : ''}>${ft_escapeHtml(prompt)}</textarea>
+          <textarea class="text_pole ft-field-examples" data-idx="${idx}" rows="2" placeholder='Examples (e.g., ["Working Out"])' ${locked ? 'disabled' : ''}>${ft_escapeHtml(examples)}</textarea>
+          <button class="menu_button ft-field-remove" data-idx="${idx}" style="padding:4px 8px; font-size:0.85em;" ${locked ? 'disabled' : ''}>X</button>
+        `;
+
+        container.appendChild(row);
+    });
 }
 
 // ===========================
@@ -282,7 +496,6 @@ const keywordBlacklist = new Set([
     'leg', 'legs', 'babe', 'baby', 'darling', 'honey', 'sweetheart', 'dear', 'love', 'oof', 'mmph', 'mmmph'
 ]);
 
-// Helper function to get user-defined blacklist as a Set
 function getUserBlacklistSet() {
     if (!extensionSettings.userBlacklist) return new Set();
     return new Set(
@@ -294,17 +507,37 @@ function getUserBlacklistSet() {
     );
 }
 
+// Helper: topic tokens (used for keyword matching in hybrid search)
+function extractTopicTerms(topic, excludeNames = new Set()) {
+    if (!topic || typeof topic !== 'string') return [];
+    const userBlacklist = getUserBlacklistSet();
+    const tokens = topic
+        .replace(/[\u2018\u2019`]/g, "'")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/g)
+        .map(t => t.trim())
+        .filter(Boolean);
+
+    const out = [];
+    for (const t of tokens) {
+        if (t.length < 3 || t.length > 30) continue;
+        if (excludeNames.has(t)) continue;
+        if (userBlacklist.has(t)) continue;
+        if (keywordBlacklist.has(t)) continue;
+        out.push(t);
+    }
+    return Array.from(new Set(out));
+}
+
 // HELPER: Aggressively strips names (and possessives) from text
 function sanitizeTextForKeywords(text, namesSet) {
     let cleanText = text;
     const sortedNames = Array.from(namesSet).sort((a, b) => b.length - a.length);
     if (sortedNames.length > 0) {
-        // Create regex to match names (whole word, case insensitive)
         const pattern = '\\b(' + sortedNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b';
         const nameRegex = new RegExp(pattern, 'gi');
-        cleanText = cleanText.replace(nameRegex, ' '); 
+        cleanText = cleanText.replace(nameRegex, ' ');
     }
-    // Collapse double spaces created by removal
     return cleanText.replace(/\s+/g, ' ').trim();
 }
 
@@ -313,37 +546,27 @@ function extractKeywords(text, excludeNames = new Set()) {
         return [];
     }
 
-    // --- STEP 1: NORMALIZE & PRE-CLEAN NLP ---
-    // Convert curly quotes to straight quotes so Compromise recognizes contractions
     text = text.replace(/[\u2018\u2019`]/g, "'");
 
-    // Run NLP on the raw text *before* stripping special chars.
     let doc = window.nlp(text);
     doc.match('#Contraction').remove();
     doc.match('#Expression').remove();
     text = doc.text();
 
-    // --- STEP 2: STRIP SPECIAL CHARS ---
-    // Fixes "dream-me" -> "dream me", "Ngh—*Tre*!" -> "Ngh Tre "
-    // Replaces hyphens, em-dashes, en-dashes, underscores, and asterisks with space.
     text = text.replace(/[-–—_*]+/g, ' ');
 
     const wordsInText = text.split(/\s+/).length;
-
     if (wordsInText < 100) {
         return [];
     }
-    
+
     const baseKeywords = 5;
     const scalingFactor = 3;
     const additionalKeywords = Math.floor((wordsInText - 100) / 100) * scalingFactor;
     const limit = baseKeywords + additionalKeywords;
 
     const finalKeywords = new Set();
-    
-    // --- STEP 3: POST-CLEAN NLP ---
-    // Re-run NLP on the now-cleaned text to build the proper Topics/Keywords list.
-    // We run the removal filters again just in case the special char stripping exposed new edge cases.
+
     doc = window.nlp(text);
     doc.match('#Expression').remove();
     doc.match('#Contraction').remove();
@@ -351,27 +574,23 @@ function extractKeywords(text, excludeNames = new Set()) {
     const processTerm = (term) => {
         const cleaned = term.toLowerCase().replace(/[^a-z]/g, "");
 
-        // Run the full validation gauntlet
         if (
             cleaned && cleaned.length > 2 &&
             !excludeNames.has(cleaned) &&
             !keywordBlacklist.has(cleaned) &&
-            !window.nlp(cleaned).has('#Verb') &&     // Strict verb filtering
-            !window.nlp(cleaned).has('#Pronoun') &&  // Strict pronoun filtering
-            window.nlp(cleaned).has('#Noun')         // Must be a noun
+            !window.nlp(cleaned).has('#Verb') &&
+            !window.nlp(cleaned).has('#Pronoun') &&
+            window.nlp(cleaned).has('#Noun')
         ) {
             finalKeywords.add(cleaned);
         }
     };
 
-    // Get topics and quotations as potential keyword sources
     const topics = doc.topics().out('array');
     const quotes = doc.quotations().out('array');
     const potentialSources = [...topics, ...quotes];
 
     for (const source of potentialSources) {
-        // Split by anything that isn't a letter or number.
-        // This ensures that if any punctuation remains, it splits the word rather than fusing it.
         const words = source.split(/[^a-zA-Z0-9]+/);
         for (const word of words) {
             processTerm(word);
@@ -384,22 +603,21 @@ function extractKeywords(text, excludeNames = new Set()) {
 function extractProperNouns(text, excludeNames) {
     if (excludeNames === undefined) excludeNames = new Set();
     if (!text || typeof text !== 'string') return [];
-    
+
     const properNouns = new Set();
     const sentences = text.split(/[.!?*]+|["'"]\s*/);
-    
+
     for (let i = 0; i < sentences.length; i++) {
         let sentence = sentences[i].trim();
         if (!sentence) continue;
-        
-        // Clean separators in sentence before splitting
+
         sentence = sentence.replace(/[-–—_*]+/g, ' ');
 
         const words = sentence.split(/\s+/);
-        
+
         for (let j = 0; j < words.length; j++) {
             const word = words[j];
-            
+
             if (j > 0 && /^[A-Z]/.test(word)) {
                 const cleaned = word.toLowerCase().replace(/[^a-z]/g, "");
 
@@ -413,7 +631,7 @@ function extractProperNouns(text, excludeNames) {
             }
         }
     }
-    
+
     return Array.from(properNouns);
 }
 
@@ -428,8 +646,7 @@ function generateUUID() {
 function getParticipantNames(contextOrChat) {
     const names = new Set();
     let context = contextOrChat;
-    
-    // Try to get global context if not provided
+
     if (!context) {
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
             context = SillyTavern.getContext();
@@ -437,21 +654,17 @@ function getParticipantNames(contextOrChat) {
             context = getContext();
         }
     } else if (Array.isArray(contextOrChat)) {
-        // If passed an array (chat history), try to grab global context for metadata anyway
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
             context = SillyTavern.getContext();
         }
     }
 
     if (context) {
-        // 1. Primary Names (Context)
         if (context.name1) names.add(context.name1.toLowerCase());
         if (context.name2) names.add(context.name2.toLowerCase());
-        
-        // 2. User Name (explicitly checked from ST globals if available)
+
         if (typeof SillyTavern !== 'undefined' && SillyTavern.user_name) names.add(SillyTavern.user_name.toLowerCase());
-        
-        // 3. Current Character Nicknames/Data
+
         if (context.characterId && typeof characters !== 'undefined' && characters[context.characterId]) {
             const charData = characters[context.characterId].data;
             if (charData && charData.nickname) {
@@ -459,7 +672,6 @@ function getParticipantNames(contextOrChat) {
             }
         }
 
-        // 4. Group Members
         if (context.groups && context.groupId) {
             const group = context.groups.find(g => g.id === context.groupId);
             if (group && group.members) {
@@ -470,8 +682,7 @@ function getParticipantNames(contextOrChat) {
                 });
             }
         }
-        
-        // 5. Chat History Scan (Backup for name changes)
+
         const chatLog = Array.isArray(contextOrChat) ? contextOrChat : (context.chat || []);
         chatLog.forEach(msg => {
             if (msg.name && typeof msg.name === 'string') {
@@ -479,20 +690,18 @@ function getParticipantNames(contextOrChat) {
             }
         });
     }
-    
-    // Expand names (split First/Last)
-    // We use a temporary array to avoid infinite loop while adding to Set
+
     const nameParts = [];
     names.forEach(n => {
         const parts = n.split(/\s+/);
         if (parts.length > 1) {
-            parts.forEach(p => { 
-                if (p.length >= 2) nameParts.push(p); 
+            parts.forEach(p => {
+                if (p.length >= 2) nameParts.push(p);
             });
         }
     });
     nameParts.forEach(p => names.add(p));
-    
+
     return names;
 }
 
@@ -527,9 +736,14 @@ function convertChatToJSONL(context) {
     context.chat.forEach((msg) => {
         if (!msg || typeof msg.mes === 'undefined') return;
         const payload = {
-            name: msg.name || msg.character || 'Unknown', mes: msg.mes, is_user: !!msg.is_user || msg.role === 'user',
-            is_system: !!msg.is_system, send_date: msg.send_date || msg.date || '', tracker: msg.tracker || {},
-            extra: msg.extra || {}, present: msg.present || msg.characters_present || []
+            name: msg.name || msg.character || 'Unknown',
+            mes: msg.mes,
+            is_user: !!msg.is_user || msg.role === 'user',
+            is_system: !!msg.is_system,
+            send_date: msg.send_date || msg.date || '',
+            tracker: msg.tracker || {},
+            extra: msg.extra || {},
+            present: msg.present || msg.characters_present || []
         };
         lines.push(JSON.stringify(payload));
     });
@@ -702,8 +916,8 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
         }
 
         finalResults.sort((a, b) => b.score - a.score);
-        console.log('[' + MODULE_NAME + '] Final results: ' + finalResults.length + 
-            ' (filtered: ' + finalResults.filter(r => r._source === 'filtered').length + 
+        console.log('[' + MODULE_NAME + '] Final results: ' + finalResults.length +
+            ' (filtered: ' + finalResults.filter(r => r._source === 'filtered').length +
             ', dense: ' + finalResults.filter(r => r._source === 'dense').length + ')');
         return finalResults;
     } catch (error) {
@@ -711,6 +925,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
         return [];
     }
 }
+
 async function getCollectionInfo(collectionName) {
     try {
         return (await qdrantRequest('/collections/' + collectionName)).result;
@@ -838,7 +1053,6 @@ function parseJSONL(jsonlContent) {
     return { chatMetadata, messages };
 }
 
-// Helper to reliably extract summary from message object
 function getSummaryFromMsg(msg) {
     if (msg && msg.extra && msg.extra.qvink_memory && typeof msg.extra.qvink_memory.memory === 'string') {
         return msg.extra.qvink_memory.memory;
@@ -853,7 +1067,7 @@ function buildEmbeddingText(message, tracker) {
         if (tracker.Topics && tracker.Topics.PrimaryTopic) parts.push('[Topic: ' + tracker.Topics.PrimaryTopic + ']');
         if (tracker.Topics && tracker.Topics.EmotionalTone) parts.push('[Tone: ' + tracker.Topics.EmotionalTone + ']');
     }
-    
+
     const summary = getSummaryFromMsg(message);
     if (summary) {
         parts.push('\nSummary: ' + summary);
@@ -861,7 +1075,6 @@ function buildEmbeddingText(message, tracker) {
     parts.push('\nMessage: ' + message.mes);
     return parts.join(' ');
 }
-
 function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     const tracker = message.tracker || {};
     let charactersPresent = (message.present && Array.isArray(message.present))
@@ -871,39 +1084,46 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     if (message.name && message.name !== 'User' && !charactersPresent.some(cp => String(cp).toLowerCase() === String(message.name).toLowerCase())) {
         charactersPresent.push(message.name);
     }
-    
-    // --- Normalize asterisk emphasis before keyword extraction ---
+
     const normalizedMessage = (message.mes || '').replace(/(\w)\*+(\w)/g, '$1 $2');
 
-    // --- AGGRESSIVE NAME STRIPPING FOR PAYLOAD GENERATION ---
-    // We create a "clean" version of the text that has NO names in it.
-    // This text is passed to the keyword extractors.
-    // This ensures that the "proper_nouns" field in the database NEVER contains names.
     const textForKeywords = sanitizeTextForKeywords(normalizedMessage, participantNames);
-    
-    // --- The Unified Keyword Pipeline ---
+
     const properNounCandidates = extractProperNouns(textForKeywords, participantNames);
     const commonKeywordCandidates = extractKeywords(textForKeywords, participantNames);
 
     const allKeywords = new Set([...properNounCandidates, ...commonKeywordCandidates]);
-    // --- End Pipeline ---
+
+    // 
+    const trackerTopic =
+        (tracker.Topics && tracker.Topics.PrimaryTopic) ||
+        (tracker.Topic) ||
+        '';
+    const topicTerms = extractTopicTerms(trackerTopic, participantNames);
+    topicTerms.forEach(t => allKeywords.add(t));
 
     const summary = getSummaryFromMsg(message);
-    
+
     return {
-        chat_id_hash: chatIdHash, message_index: messageIndex, character_name: message.name, is_user: !!message.is_user,
-        timestamp: message.send_date || '', summary: summary, full_message: message.mes, characters_present: charactersPresent,
-        topic: (tracker.Topics && tracker.Topics.PrimaryTopic) || '', emotional_tone: (tracker.Topics && tracker.Topics.EmotionalTone) || '',
+        chat_id_hash: chatIdHash,
+        message_index: messageIndex,
+        character_name: message.name,
+        is_user: !!message.is_user,
+        timestamp: message.send_date || '',
+        summary: summary,
+        full_message: message.mes,
+        characters_present: charactersPresent,
+        topic: (tracker.Topics && tracker.Topics.PrimaryTopic) || '',
+        emotional_tone: (tracker.Topics && tracker.Topics.EmotionalTone) || '',
         location: (tracker.Characters && tracker.Characters[message.name] && tracker.Characters[message.name].Location) || '',
         proper_nouns: Array.from(allKeywords)
     };
 }
 
-
 function getQueryMessage(context, idxOverride, generationType) {
     if (idxOverride === undefined) idxOverride = null;
     if (generationType === undefined) generationType = 'normal';
-    
+
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
     if (idxOverride !== null && idxOverride >= 0 && idxOverride < context.chat.length) {
         const m = context.chat[idxOverride];
@@ -934,7 +1154,7 @@ function getQueryMessage(context, idxOverride, generationType) {
 /**
  * Constructs a query string from multiple messages.
  * Respects group chat presence logic.
- * NEW: Injects Tracker State into Query!
+ * NEW: Injects ONLY Topic (Location removed as requested).
  */
 function constructMultiMessageQuery(context, generationType) {
     const anchorMsg = getQueryMessage(context, null, generationType);
@@ -949,7 +1169,6 @@ function constructMultiMessageQuery(context, generationType) {
     const isGroup = isCurrentChatGroupChat();
     const collectedText = [];
 
-    // 1. Gather Chat Context
     let messagesFound = 0;
     let currentIdx = anchorIdx;
     while (messagesFound < count && currentIdx >= 0) {
@@ -970,16 +1189,16 @@ function constructMultiMessageQuery(context, generationType) {
         }
         currentIdx--;
     }
-    
+
     let query = collectedText.join('\n');
 
-    // 2. INJECT TRACKER CONTEXT (SYNERGY)
+    // 
     if (extensionSettings.trackerEnabled) {
         const t = window.RagTrackerState;
-        const dateStr = t.getFormattedDate();
-        // This makes Qdrant search for relevant Locations and Moods automatically
-        query += `\n[Context: Location is ${t.location}, Mood is ${t.tone}, Current Date is ${dateStr}]`;
-        console.log(`[${MODULE_NAME}] Enhanced Query with FuckTracker: ${t.location}, ${t.tone}`);
+        if (t && typeof t.topic === 'string' && t.topic.trim()) {
+            query += `\n[Topic: ${t.topic.trim()}]`;
+            console.log(`[${MODULE_NAME}] Enhanced Query with FuckTracker Topic: ${t.topic.trim()}`);
+        }
     }
 
     return query;
@@ -995,14 +1214,14 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
     console.log('[' + MODULE_NAME + '] Starting indexing process...');
     updateUI('status', 'Preparing to index...');
     showStopButton();
-    
+
     try {
         const { messages } = parseJSONL(jsonlContent);
         if (messages.length === 0) throw new Error('No messages found in chat');
 
         const participantNames = getParticipantNames(messages);
         console.log('[' + MODULE_NAME + '] Excluding participant names: ' + Array.from(participantNames).join(', '));
-        
+
         const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatIdHash;
         const existingPoints = await countPoints(collectionName);
         if (existingPoints >= messages.length) {
@@ -1010,21 +1229,20 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
             updateUI('status', 'Chat already indexed (' + existingPoints + ' messages)');
             isIndexing = false;
             hideStopButton();
-            // Populate tracker for existing messages to catch updates
             messages.forEach((msg, idx) => {
                 lastKnownSummaries.set(idx, getSummaryFromMsg(msg));
             });
             return true;
         }
-        
+
         console.log('[' + MODULE_NAME + '] Need to index ' + messages.length + ' messages (existing: ' + existingPoints + ')');
         updateUI('status', 'Getting embedding dimensions...');
         const vectorSize = (await generateEmbedding(buildEmbeddingText(messages[0], messages[0].tracker))).length;
         await createCollection(collectionName, vectorSize);
-        
+
         const EMBEDDING_BATCH_SIZE = 1024;
         const upsertBatchSize = 10;
-        
+
         for (let batchStart = 0; batchStart < messages.length; batchStart += EMBEDDING_BATCH_SIZE) {
             if (shouldStopIndexing) {
                 console.log('[' + MODULE_NAME + '] Indexing stopped by user.');
@@ -1033,22 +1251,21 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
                 hideStopButton();
                 return false;
             }
-            
+
             const batchEnd = Math.min(batchStart + EMBEDDING_BATCH_SIZE, messages.length);
             const batchMessages = messages.slice(batchStart, batchEnd);
             updateUI('status', 'Indexing ' + batchStart + '-' + batchEnd + '/' + messages.length + '...');
-            
+
             const embeddingTexts = batchMessages.map(msg => buildEmbeddingText(msg, msg.tracker));
             const embeddings = await generateEmbedding(embeddingTexts);
-            
+
             const points = [];
             for (let i = 0; i < batchMessages.length; i++) {
                 const message = batchMessages[i];
                 const messageIndex = batchStart + i;
                 const payload = extractPayload(message, messageIndex, chatIdHash, participantNames);
                 points.push({ id: generateUUID(), vector: embeddings[i], payload: payload });
-                
-                // Track summary state
+
                 lastKnownSummaries.set(messageIndex, getSummaryFromMsg(message));
 
                 if (points.length >= upsertBatchSize) {
@@ -1060,7 +1277,7 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
                 await upsertVectors(collectionName, points);
             }
         }
-        
+
         updateUI('status', 'Successfully indexed ' + messages.length + ' messages!');
         console.log('[' + MODULE_NAME + '] Successfully indexed ' + messages.length + ' messages');
     } catch (error) {
@@ -1073,7 +1290,6 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
     }
 }
 
-
 async function indexSingleMessage(message, chatIdHash, messageIndex, isGroupChat = false) {
     try {
         const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatIdHash;
@@ -1082,10 +1298,9 @@ async function indexSingleMessage(message, chatIdHash, messageIndex, isGroupChat
         const payload = extractPayload(message, messageIndex, chatIdHash, participantNames);
         const point = { id: generateUUID(), vector: embedding, payload: payload };
         await upsertVectors(collectionName, [point]);
-        
-        // Track summary state
+
         lastKnownSummaries.set(messageIndex, getSummaryFromMsg(message));
-        
+
         console.log('[' + MODULE_NAME + '] Indexed message ' + messageIndex);
         return true;
     } catch (error) {
@@ -1107,25 +1322,39 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         } else if (typeof getContext === 'function') {
             context = getContext();
         }
-        
+
         const excludeCount = extensionSettings.excludeLastMessages !== undefined ? extensionSettings.excludeLastMessages : 2;
         const maxIndex = (context && context.chat) ? Math.max(0, context.chat.length - excludeCount) : 999999999;
-        
+
         const participantNames = getParticipantNames(null);
 
-        // --- PATH A: DENSE VECTOR (KEEPS NAMES) ---
+        // Dense vector keeps names
         const queryEmbedding = await generateEmbedding(query);
-        
-        // --- PATH B: KEYWORD FILTER (STRIPS NAMES) ---
+
+        // Keyword filter strips names
         const textForKeywords = sanitizeTextForKeywords(query, participantNames);
         const queryFilterTerms = extractQueryFilterTerms(textForKeywords, participantNames);
-        
-        if (queryFilterTerms.length > 0) {
-             console.log('[' + MODULE_NAME + '] Query Keywords (Names Removed):', queryFilterTerms);
+
+        // 
+        // This preserves your existing query behavior but guarantees Topic participates in hybrid filtering.
+        const topicTerms = extractTopicTerms(window.RagTrackerState?.topic, participantNames);
+        const merged = new Set(queryFilterTerms);
+        topicTerms.forEach(t => merged.add(t));
+        const finalFilterTerms = Array.from(merged);
+
+        if (finalFilterTerms.length > 0) {
+            console.log('[' + MODULE_NAME + '] Query Keywords (Names Removed + Topic):', finalFilterTerms);
         }
 
-        const results = await searchVectors(collectionName, queryEmbedding, extensionSettings.retrievalCount, extensionSettings.similarityThreshold, queryFilterTerms, maxIndex);
-        
+        const results = await searchVectors(
+            collectionName,
+            queryEmbedding,
+            extensionSettings.retrievalCount,
+            extensionSettings.similarityThreshold,
+            finalFilterTerms,
+            maxIndex
+        );
+
         if (results.length === 0) {
             console.log('[' + MODULE_NAME + '] No relevant context found');
             return '';
@@ -1144,16 +1373,14 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
             console.log('[' + MODULE_NAME + '] No context left after characters_present filter');
             return '';
         }
-        
+
         console.log('[' + MODULE_NAME + '] Retrieved ' + filteredByPresence.length + ' messages with scores:', filteredByPresence.map(r => r.score.toFixed(3)).join(', '));
-        
-        // --- CONTEXT BUDGETING (TOKEN BASED) ---
+
         let currentTotalTokens = 0;
         const contextParts = [];
         const tokenBudget = extensionSettings.maxTokenBudget || 1000;
         let budgetHit = false;
 
-        // Results are already sorted by score (Descending)
         for (const result of filteredByPresence) {
             const p = result.payload;
             const score = result.score;
@@ -1161,7 +1388,6 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
             if (p.summary) text += `\n\nSummary: ${p.summary}`;
             text += `\n\nFull Message: ${p.full_message}`;
 
-            // Approximate token count (1 token ~= 4 chars)
             const estimatedTokens = Math.ceil(text.length / 4);
 
             if (currentTotalTokens + estimatedTokens > tokenBudget) {
@@ -1190,11 +1416,6 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         return '';
     }
 }
-
-// ===========================
-// SillyTavern Integration
-// ===========================
-
 function getCurrentChatId() {
     try {
         let context = null;
@@ -1229,6 +1450,7 @@ function isCurrentChatGroupChat() {
         return false;
     }
 }
+
 async function onChatLoaded() {
     currentChatIndexed = false;
     lastMessageCount = 0;
@@ -1236,8 +1458,13 @@ async function onChatLoaded() {
     lastKnownSummaries.clear();
     const chatId = getCurrentChatId();
     lastChatId = chatId;
-    
-    // Tracker Sync
+
+    // Reset snapshots per chat
+    window.FuckTrackerSnapshots.byMesId = Object.create(null);
+    window.FuckTrackerSnapshots.pending = [];
+
+    // Init tracker clock for this chat
+    window.RagTrackerState.initClockFromSettingsAndChat();
     tracker_updateSettingsDebug();
 
     console.log('[' + MODULE_NAME + '] Chat loaded. Chat ID:', chatId);
@@ -1266,6 +1493,7 @@ async function onChatLoaded() {
         console.error('[' + MODULE_NAME + '] Error in onChatLoaded:', error);
     }
 }
+
 async function onMessageSent(messageData) {
     if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
     const chatId = getCurrentChatId();
@@ -1383,13 +1611,14 @@ async function onMessageEdited(data) {
         console.error('[' + MODULE_NAME + '] Edit reindex failed:', err);
     }
 }
+
 async function startPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
     pollingInterval = setInterval(async () => {
         try {
             if (isIndexing) return;
             if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
-            
+
             const chatId = getCurrentChatId();
             if (!chatId) return;
             let context = null;
@@ -1397,7 +1626,7 @@ async function startPolling() {
             else if (typeof getContext === 'function') context = getContext();
             if (!context?.chat) return;
             const isGroupChat = isCurrentChatGroupChat();
-            
+
             if (!currentChatIndexed) {
                 if (context.chat.length === 0) return;
                 await indexChat(convertChatToJSONL(context), chatId, isGroupChat);
@@ -1405,7 +1634,7 @@ async function startPolling() {
                 lastMessageCount = context.chat.length;
                 return;
             }
-            
+
             if (!eventsRegistered) {
                 if (context.chat.length > lastMessageCount) {
                     for (let i = lastMessageCount; i < context.chat.length; i++) {
@@ -1415,39 +1644,40 @@ async function startPolling() {
                     lastMessageCount = context.chat.length;
                 }
             } else {
-                lastMessageCount = context.chat.length; 
+                lastMessageCount = context.chat.length;
             }
-            
+
             for (let i = 0; i < context.chat.length; i++) {
                 const msg = context.chat[i];
                 const currentSum = getSummaryFromMsg(msg);
                 const knownSum = lastKnownSummaries.get(i);
-                
+
                 if (lastKnownSummaries.has(i) && currentSum !== knownSum) {
                     console.log('[' + MODULE_NAME + '] [Qvlink Sync] Summary changed for message ' + i + '. Re-indexing...');
                     updateUI('status', '↻ Syncing summary for msg #' + i);
-                    lastKnownSummaries.set(i, currentSum); 
+                    lastKnownSummaries.set(i, currentSum);
                     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
                     await deleteMessageByIndex(collectionName, chatId, i);
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
-                    
+
                     setTimeout(() => {
                         const statusEl = document.getElementById('ragfordummies_status');
                         if (statusEl && statusEl.textContent.indexOf('Syncing summary') !== -1) {
                             statusEl.textContent = 'Ready';
                         }
                     }, 2000);
-                } 
+                }
                 else if (!lastKnownSummaries.has(i)) {
                     lastKnownSummaries.set(i, currentSum);
                 }
             }
-            
+
         } catch (e) {
             console.warn('[' + MODULE_NAME + '] Polling error:', e.message);
         }
     }, 3000);
 }
+
 async function injectContextWithSetExtensionPrompt(generationType) {
     if (!extensionSettings.enabled || !extensionSettings.injectContext) return;
     const chatId = getCurrentChatId();
@@ -1463,16 +1693,15 @@ async function injectContextWithSetExtensionPrompt(generationType) {
     if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
     else if (typeof getContext === 'function') context = getContext();
     if (!context?.chat?.length || !context.setExtensionPrompt) return;
-    
-    // NEW QUERY CONSTRUCTION
+
     const queryText = constructMultiMessageQuery(context, generationType);
     if (!queryText) return;
-    
+
     console.log('[' + MODULE_NAME + '] Generating query embedding for text: "' + queryText.substring(0, 100).replace(/\n/g, ' ') + '..."');
-    
+
     const retrievedContext = await retrieveContext(queryText.substring(0, 2000), chatId, isCurrentChatGroupChat());
     if (!retrievedContext) return;
-    
+
     let position = 1, depth = 4;
     if (extensionSettings.injectionPosition === 'before_main') { position = 0; depth = 0; }
     else if (extensionSettings.injectionPosition === 'after_main') { position = 1; depth = 0; }
@@ -1490,213 +1719,221 @@ async function injectContextWithSetExtensionPrompt(generationType) {
 // LISTENERS (Tracker + RAG)
 // ===========================
 
+function buildFuckTrackerInstruction() {
+    const contextDepth = extensionSettings.trackerContextDepth || 10;
+    const fields = Array.isArray(extensionSettings.trackerFields) ? extensionSettings.trackerFields : [];
+
+    const normalized = [...fields];
+    const hasLocation = normalized.some(f => f?.title === "Location");
+    const hasTopic = normalized.some(f => f?.title === "Topic");
+
+    if (!hasLocation) normalized.unshift({
+        title: "Location",
+        prompt: "Provide the current specific location in the format: Specific Place, Building, City, State.",
+        examples: `["The Green Mill Lounge, Uptown, Chicago, Illinois"]`,
+        locked: true,
+        required: true,
+    });
+    if (!hasTopic) normalized.splice(1, 0, {
+        title: "Topic",
+        prompt: "Provide a one- or two-word description of the main activity/event/subject driving the current scene's focus. Be specific and concise.",
+        examples: `["Working Out"]`,
+        locked: true,
+        required: true,
+    });
+
+    const jsonKeys = normalized.map(f => `  "${f.title}": ""`).join(',\n');
+
+    const fieldGuidance = normalized.map(f => {
+        const title = f.title;
+        const prompt = (f.prompt || "").trim();
+        const examples = (f.examples || "").trim();
+
+        return [
+            `- ${title}:`,
+            prompt ? `  Prompt: ${prompt}` : `  Prompt: (none)`,
+            examples ? `  Examples: ${examples}` : `  Examples: (none)`,
+        ].join('\n');
+    }).join('\n');
+
+    return `
+\n[SYSTEM INSTRUCTION: FUCKTRACKER]
+Analyze the last ${contextDepth} messages and the current scenario.
+
+CRITICAL RULES:
+- DO NOT output Time/Date fields. Time/Date are computed by the application and must not be invented.
+- You MUST output a hidden JSON block between ⦗ and ⦘ at the very start of your response.
+- After the JSON block, you MUST output the character's normal dialogue/response.
+- Output ONLY the fields listed below. Do not add extra keys.
+
+Output Format:
+⦗
+{
+${jsonKeys}
+}
+⦘
+(then the character dialogue)
+
+Field Guidance:
+${fieldGuidance}
+`;
+}
+
 const tracker_injectInstruction = () => {
     if (!extensionSettings.trackerEnabled) return;
-    
+
     let context = null;
     if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
     else if (typeof getContext === 'function') context = getContext();
-    
+
     if (!context || !context.setExtensionPrompt) return;
 
-    const contextDepth = extensionSettings.trackerContextDepth || 10;
-    
-    // --- THE MEGA PROMPT (Updated to your specifics and fixed logic) ---
-    const instruction = `
-\n[SYSTEM INSTRUCTION: FUCKTRACKER]
-Analyze the last ${contextDepth} messages and the current scenario. You must output a hidden JSON block detailing the current state of the world and character.
-
-Output Format:
-1. Start your response with \`⦗\`.
-2. Output a valid JSON block containing the fields below.
-3. Close the JSON block with \`⦘\`.
-4. CRITICAL: You must write the character's response/dialogue AFTER the JSON block. Do not output only the JSON.
-
-Example Structure:
-⦗
-{
-  "Time": "4:30 p.m; 06/15/1929 (Saturday)",
-  "Tone": "Perfect",
-  "Topic": "Tense Negotiation",
-  "CharactersPresent": ["{{user}}", "Al Capone"],
-  "Outfit": ["Black pinstripe suit", "White fedora", "Gold watch"],
-  "StateOfDress": "Suit jacket unbuttoned, tie loosened slightly.",
-  "CurrentAction": "Sitting at desk, smoking a cigar",
-  "Location": "The Green Mill Lounge, Uptown, Chicago, Illinois",
-  "Weather": "22°C, 60% humidity, light wind. Overcast with threatening rain.",
-  "Cash": "500 USD in money clip in jacket pocket",
-  "Income": "Bootlegging operations, Weekly, 5000 USD",
-  "Intoxication": "Slightly buzzed",
-  "HungerThirst": "Not hungry, drinking whiskey",
-  "Excretion": "No urge"
-}
-⦘
-*Al leans back in his chair, ash falling from his cigar.* "So, you think you can just walk in here?"
-
-Field Requirements:
-1. Time: Format as "HH:MM p.m; MM/DD/YYYY (DayName)".
-2. Topic: 1-2 words on primary nature/dynamic.
-3. CharactersPresent: Array of nicknames. Put {{user}} first if present. Only active participants.
-4. Outfit: Detailed list of clothing/accessories/undergarments. No status description here. If naked, state it.
-5. StateOfDress: Condition/arrangement (wrinkled, unbuttoned, damaged). If naked: "No clothing present".
-6. CurrentAction: Posture, interaction (e.g., "Standing at podium").
-7. Location: "Specific Place, Building, City, State".
-8. Weather: Scientific tone (Temp C, wind, clouds). Match time/environment.
-9. Cash: Amount (USD) and location (wallet/pocket). Infer realistic amount if unknown. No "Unknown".
-10. Income: Source, frequency, estimated amount. Single line.
-11. Intoxication: Logical level based on intake.
-12. HungerThirst: Logical level based on time since last meal.
-13. Excretion: Biological urge level (bladder/bowels) based on 24h cycle/intake.
-`;
-
+    const instruction = buildFuckTrackerInstruction();
     context.setExtensionPrompt('RagTracker', instruction, 1, 0, true);
-    console.log(`[${MODULE_NAME}] [TRACKER] System Instructions Injected via setExtensionPrompt.`);
+    console.log(`[${MODULE_NAME}] [FUCKTRACKER] Prompt Injected (dynamic fields).`);
 };
-
 
 const tracker_onReplyProcessed = (data) => {
     if (!extensionSettings.trackerEnabled) return data;
-    const rawMsg = data.text;
+    if (!data || typeof data.text !== 'string') return data;
 
-    // Updated regex to capture JSON block between ⦗ and ⦘
+    const rawMsg = data.text;
     const regex = /⦗([\s\S]*?)⦘/;
     const match = rawMsg.match(regex);
+
+    // Snapshot time for THIS assistant message before we advance clock
+    if (!Number.isFinite(window.RagTrackerState._clockMs)) {
+        window.RagTrackerState.initClockFromSettingsAndChat();
+    }
+    const messageTime = window.RagTrackerState.formatClock(window.RagTrackerState._clockMs);
 
     if (match) {
         const jsonStr = match[1];
         try {
             const parsedData = JSON.parse(jsonStr);
+
             window.RagTrackerState.updateFromJSON(parsedData);
 
-            console.log(`[${MODULE_NAME}] [TRACKER] State Updated via JSON`);
+            // snapshot for this message
+            const snapshot = {
+                time: messageTime,
+                location: window.RagTrackerState.location,
+                topic: window.RagTrackerState.topic,
+                fields: { ...(window.RagTrackerState.fields || {}) },
+            };
 
-            // Remove the JSON block from the message text
+            const mesId = ft_getMesIdFromEventArg(data);
+            if (mesId != null) {
+                window.FuckTrackerSnapshots.byMesId[String(mesId)] = snapshot;
+            } else {
+                window.FuckTrackerSnapshots.pending.push(snapshot);
+            }
+
+            console.log(`[${MODULE_NAME}] [FUCKTRACKER] State Updated + Snapshot stored`);
+
             data.text = rawMsg.replace(regex, "").trim();
-
-            // If the AI didn't write anything after the block, add a note
             if (data.text.length === 0) {
                 data.text = "(AI failed to generate dialogue. Please regenerate.)";
             }
-            
         } catch (e) {
-            console.error(`[${MODULE_NAME}] [TRACKER] Failed to parse JSON:`, e);
-            console.error(`[${MODULE_NAME}] [TRACKER] Raw JSON string:`, jsonStr);
-            // Fallback: Just remove the block if it failed to parse
+            console.error(`[${MODULE_NAME}] [FUCKTRACKER] Failed to parse JSON:`, e);
+            console.error(`[${MODULE_NAME}] [FUCKTRACKER] Raw JSON string:`, jsonStr);
             data.text = rawMsg.replace(regex, "").trim();
         }
     }
+
+    // advance clock per assistant message (as requested)
+    window.RagTrackerState.advanceClock();
+    tracker_updateSettingsDebug();
+
     return data;
 };
 
-// NEW: Handler for when a character message is rendered in the UI
-async function onCharacterMessageRendered(messageId) {
-    if (!extensionSettings.trackerEnabled || !extensionSettings.trackerInline) return;
-    
-    // Wait a bit for the message to fully render in DOM
-    await new Promise(resolve => setTimeout(resolve, 150));
-    
-    try {
-        // Find the message element by its unique ID
-        const messageBlock = document.querySelector(`.mes_block[mesid="${messageId}"]`);
-        if (!messageBlock) {
-            console.warn('[' + MODULE_NAME + '] Could not find message block with mesid=' + messageId);
-            return;
-        }
-        
-        // Check if it's a user message (skip those)
-        if (messageBlock.classList.contains('user_mes')) {
-            return;
-        }
-        
-        const messageContent = messageBlock.querySelector('.mes');
-        if (!messageContent) {
-            console.warn('[' + MODULE_NAME + '] Could not find .mes content area for message ' + messageId);
-            return;
-        }
+function ft_buildTrackerHtmlFromSnapshot(snapshot) {
+    const time = snapshot?.time ?? window.RagTrackerState.time;
+    const location = snapshot?.location ?? window.RagTrackerState.location;
+    const topic = snapshot?.topic ?? window.RagTrackerState.topic;
+    const fields = snapshot?.fields ?? window.RagTrackerState.fields ?? {};
 
-        // Check if tracker display already exists to avoid duplicates
-        if (messageContent.querySelector('.ft-tracker-display')) {
-            console.log('[' + MODULE_NAME + '] Tracker display already exists for message ' + messageId);
-            return;
-        }
-        
-        // Generate and inject the tracker HTML
-        const s = window.RagTrackerState;
-        const renderArr = (arr) => Array.isArray(arr) && arr.length ? arr.join(', ') : 'None';
-        
-        const trackerHtml = `
-<div class="ft-tracker-display" data-tracker="true">
-    <div class="ft-grid">
-        <div class="ft-cell full-width">
-            <div class="ft-label">Time & Date</div>
-            <div class="ft-val">${s.time}</div>
-        </div>
-        
-        <div class="ft-cell full-width">
-            <div class="ft-label">Location</div>
-            <div class="ft-val">${s.location}</div>
-        </div>
+    const settingsFields = Array.isArray(extensionSettings.trackerFields) ? extensionSettings.trackerFields : [];
+    const orderedTitles = settingsFields.map(f => f?.title).filter(Boolean);
 
-        <div class="ft-cell">
-            <div class="ft-label">Weather</div>
-            <div class="ft-val">${s.weather}</div>
-        </div>
-        <div class="ft-cell">
-            <div class="ft-label">Action</div>
-            <div class="ft-val">${s.action}</div>
-        </div>
-
-        <div class="ft-cell">
-            <div class="ft-label">Topic</div>
-            <div class="ft-val">${s.topic}</div>
-        </div>
-        <div class="ft-cell">
-            <div class="ft-label">Tone</div>
-            <div class="ft-val">${s.tone}</div>
-        </div>
-
-        <div class="ft-cell full-width">
-            <div class="ft-label">Present</div>
-            <div class="ft-val">${renderArr(s.present)}</div>
-        </div>
-
-        <div class="ft-cell full-width">
-            <div class="ft-label">Outfit</div>
-            <div class="ft-val" style="font-size:0.9em;">${renderArr(s.outfit)}</div>
-        </div>
-        
-        <div class="ft-cell full-width">
-            <div class="ft-label">State of Dress</div>
-            <div class="ft-val" style="font-style:italic;">${s.dressState}</div>
-        </div>
-
-        <div class="ft-cell">
-            <div class="ft-label">Cash</div>
-            <div class="ft-val">${s.cash}</div>
-        </div>
-        <div class="ft-cell">
-            <div class="ft-label">Income</div>
-            <div class="ft-val" style="font-size:0.8em;">${s.income}</div>
-        </div>
-
-        <div class="ft-cell">
-            <div class="ft-label">Intoxication</div>
-            <div class="ft-val">${s.intoxication}</div>
-        </div>
-        <div class="ft-cell">
-            <div class="ft-label">Needs</div>
-            <div class="ft-val" style="font-size:0.85em;">H/T: ${s.hunger}<br>Exc: ${s.excretion}</div>
-        </div>
-    </div>
-</div>`;
-        
-        // Insert at the beginning of the message content
-        messageContent.insertAdjacentHTML('afterbegin', trackerHtml);
-        console.log('[' + MODULE_NAME + '] Tracker display injected for message ' + messageId);
-        
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Error injecting tracker display:', error);
+    const titles = [];
+    const seen = new Set();
+    for (const t of ["Time & Date", "Location", "Topic", ...orderedTitles]) {
+        if (seen.has(t)) continue;
+        seen.add(t);
+        titles.push(t);
     }
+
+    const getValForTitle = (title) => {
+        if (title === "Time & Date") return time;
+        if (title === "Location") return location;
+        if (title === "Topic") return topic;
+        return ft_renderValue(fields[title]);
+    };
+
+    // mix: first three full width; rest can be half width if you want later
+    const cells = titles.map((title, idx) => {
+        const full = (idx < 3) ? 'full-width' : 'full-width'; // keep full-width for readability
+        return `
+        <div class="ft-cell ${full}">
+            <div class="ft-label">${ft_escapeHtml(title)}</div>
+            <div class="ft-val">${ft_escapeHtml(getValForTitle(title))}</div>
+        </div>`;
+    }).join('\n');
+
+    return `
+<div class="ft-tracker-display" data-tracker="true">
+  <div class="ft-grid">
+    ${cells}
+  </div>
+</div>`;
+}
+
+// DOM injection hook
+async function onCharacterMessageRendered(eventArg) {
+    if (!extensionSettings.trackerEnabled || !extensionSettings.trackerInline) return;
+
+    const mesId = ft_getMesIdFromEventArg(eventArg);
+    if (mesId == null) return;
+
+    const maxWaitMs = 2500;
+    const start = Date.now();
+
+    let mesEl = null;
+    let mesTextEl = null;
+
+    while (Date.now() - start < maxWaitMs) {
+        mesEl = ft_findMesElementByMesId(mesId);
+        if (mesEl) {
+            if (mesEl.classList.contains('user_mes')) return;
+            mesTextEl = mesEl.querySelector('.mes_text');
+            if (mesTextEl) break;
+        }
+        await new Promise(r => setTimeout(r, 50));
+    }
+
+    if (!mesEl || !mesTextEl) {
+        console.warn(`[${MODULE_NAME}] [FUCKTRACKER] Could not resolve DOM for mesid=${mesId}`, { eventArg });
+        return;
+    }
+
+    if (mesEl.querySelector('.ft-tracker-display')) return;
+
+    const key = String(mesId);
+    let snapshot = window.FuckTrackerSnapshots.byMesId[key];
+    if (!snapshot && window.FuckTrackerSnapshots.pending.length) {
+        snapshot = window.FuckTrackerSnapshots.pending.shift();
+        window.FuckTrackerSnapshots.byMesId[key] = snapshot;
+    }
+
+    const trackerHtml = ft_buildTrackerHtmlFromSnapshot(snapshot);
+
+    // ✅ insert ABOVE dialogue (.mes_text) as separate block
+    mesTextEl.insertAdjacentHTML('beforebegin', trackerHtml);
+
+    console.log(`[${MODULE_NAME}] [FUCKTRACKER] Injected tracker header for mesid=${mesId}`);
 }
 
 // ===========================
@@ -1718,6 +1955,7 @@ function updateUI(element, value) {
         else el.value = value;
     }
 }
+
 function createSettingsUI() {
     const html = `
         <div id="ragfordummies_container" class="inline-drawer">
@@ -1725,7 +1963,7 @@ function createSettingsUI() {
             <div class="inline-drawer-content">
                 <div class="ragfordummies-settings">
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
-                    
+
                     <!-- FUCK TRACKER SECTION -->
                     <div class="ragfordummies-section">
                         <div id="rag_tracker_drawer" class="inline-drawer">
@@ -1733,10 +1971,27 @@ function createSettingsUI() {
                             <div class="inline-drawer-content">
                                 <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_enabled" ${extensionSettings.trackerEnabled ? 'checked' : ''} />Enable State Tracking</label>
                                 <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_inline" ${extensionSettings.trackerInline ? 'checked' : ''} />Show Tracker Header</label>
-                                <div class="flex-container"><label>Context Depth</label><input type="number" id="ragfordummies_tracker_context_depth" class="text_pole" value="${extensionSettings.trackerContextDepth}" min="1" max="50">
-                                <small>How many recent messages the AI should analyze to infer changes.</small></div>
-                                
-                                <div style="margin-top:10px; padding:5px; background:rgba(0,0,0,0.2); border-radius:4px; font-family:monospace; font-size:0.8em;"><strong>Current State:</strong><br><span id="ft_debug_time">Loading...</span></div>
+
+                                <div class="flex-container">
+                                    <label>Context Depth</label>
+                                    <input type="number" id="ragfordummies_tracker_context_depth" class="text_pole" value="${extensionSettings.trackerContextDepth}" min="1" max="50">
+                                    <small>How many recent messages the AI should analyze to infer changes.</small>
+                                </div>
+
+                                <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.2); border-radius:6px;">
+                                  <div style="font-weight:700; margin-bottom:6px;">Tracked Fields</div>
+
+                                  <div id="ft_fields_container"></div>
+
+                                  <button id="ft_add_field_btn" class="menu_button" style="margin-top:6px; padding:4px 8px; font-size:0.85em;">
+                                    Add new field
+                                  </button>
+
+                                  <div style="margin-top:10px; padding:5px; background:rgba(0,0,0,0.25); border-radius:4px; font-family:monospace; font-size:0.8em;">
+                                    <strong>Current State:</strong><br>
+                                    <span id="ft_debug_time">Loading...</span>
+                                  </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1753,13 +2008,14 @@ function createSettingsUI() {
         </div>`;
     return html;
 }
+
 function attachEventListeners() {
     const settingIds = [
-        'enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
-        'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index', 
+        'enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model',
+        'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index',
         'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
         'max_token_budget',
-        // FUCK TRACKER Settings
+        // Tracker settings
         'tracker_enabled', 'tracker_time_step', 'tracker_inline', 'tracker_start_date', 'tracker_context_depth'
     ];
     settingIds.forEach(id => {
@@ -1770,6 +2026,7 @@ function attachEventListeners() {
                 if (element.type === 'checkbox') extensionSettings[key] = element.checked;
                 else if (element.type === 'number') extensionSettings[key] = parseFloat(element.value) || 0;
                 else extensionSettings[key] = element.value;
+
                 if (id === 'auto_index') {
                     if (element.checked && !pollingInterval) startPolling();
                     else if (!element.checked && pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
@@ -1779,16 +2036,6 @@ function attachEventListeners() {
             });
         }
     });
-    
-    // Edit Tracker Manual Overrides
-    ['loc', 'wear', 'tone'].forEach(field => {
-        document.getElementById('ft_manual_' + field)?.addEventListener('change', function() {
-            const val = this.value;
-            if (field === 'loc') window.RagTrackerState.location = val;
-            if (field === 'wear') window.RagTrackerState.clothing = val;
-            if (field === 'tone') window.RagTrackerState.tone = val;
-        });
-    });
 
     document.getElementById('ragfordummies_embedding_provider')?.addEventListener('change', function() {
         const provider = this.value;
@@ -1796,11 +2043,11 @@ function attachEventListeners() {
         document.getElementById('ragfordummies_ollama_settings').style.display = provider === 'ollama' ? '' : 'none';
         document.getElementById('ragfordummies_openai_settings').style.display = provider === 'openai' ? '' : 'none';
     });
-    
+
     document.getElementById('ragfordummies_injection_position')?.addEventListener('change', function() {
         document.getElementById('ragfordummies_inject_after_messages_setting').style.display = this.value === 'after_messages' ? '' : 'none';
     });
-    
+
     document.getElementById('ragfordummies_index_current')?.addEventListener('click', async () => {
         try {
             const chatId = getCurrentChatId();
@@ -1826,7 +2073,7 @@ function attachEventListeners() {
         shouldStopIndexing = true;
         updateUI('status', 'Stopping...');
     });
-    
+
     const uploadBtn = document.getElementById('ragfordummies_upload_btn');
     const fileInput = document.getElementById('ragfordummies_file_input');
     if (uploadBtn && fileInput) {
@@ -1863,6 +2110,56 @@ function attachEventListeners() {
             fileInput.value = '';
         });
     }
+
+    // Tracker fields UI wiring
+    ft_ensureRequiredFields();
+    ft_renderFieldsUI();
+
+    document.getElementById('ft_add_field_btn')?.addEventListener('click', () => {
+        ft_ensureRequiredFields();
+        extensionSettings.trackerFields.push({
+            title: "",
+            prompt: "",
+            examples: "",
+            locked: false,
+            required: false,
+        });
+        saveSettings();
+        ft_renderFieldsUI();
+    });
+
+    document.getElementById('ft_fields_container')?.addEventListener('input', (e) => {
+        const t = e.target;
+        if (!t) return;
+
+        const idx = Number(t.getAttribute('data-idx'));
+        if (!Number.isFinite(idx)) return;
+
+        const fields = extensionSettings.trackerFields;
+        if (!Array.isArray(fields) || !fields[idx]) return;
+        if (fields[idx].locked) return;
+
+        if (t.classList.contains('ft-field-title')) fields[idx].title = t.value;
+        if (t.classList.contains('ft-field-prompt')) fields[idx].prompt = t.value;
+        if (t.classList.contains('ft-field-examples')) fields[idx].examples = t.value;
+
+        saveSettings();
+    });
+
+    document.getElementById('ft_fields_container')?.addEventListener('click', (e) => {
+        const btn = e.target;
+        if (!btn?.classList?.contains('ft-field-remove')) return;
+
+        const idx = Number(btn.getAttribute('data-idx'));
+        const fields = extensionSettings.trackerFields;
+        if (!Array.isArray(fields) || !fields[idx]) return;
+        if (fields[idx].locked) return;
+
+        fields.splice(idx, 1);
+        ft_ensureRequiredFields();
+        saveSettings();
+        ft_renderFieldsUI();
+    });
 }
 
 function saveSettings() {
@@ -1886,12 +2183,14 @@ function loadSettings() {
 
 async function init() {
     loadSettings();
+    ft_ensureRequiredFields();
+
     if (pollingInterval) clearInterval(pollingInterval);
     pollingInterval = null;
-    injectTrackerCSS(); // Load CSS
-    tracker_initDate(); // Load Date
-    
-    // Asynchronously load the compromise NLP library from a CDN
+
+    injectTrackerCSS();
+    tracker_initDate();
+
     async function loadNlpLibrary() {
         return new Promise((resolve, reject) => {
             if (typeof window.nlp !== 'undefined') {
@@ -1917,14 +2216,12 @@ async function init() {
     try {
         await loadNlpLibrary();
     } catch (error) {
-        // If the library fails to load, the extension can still run, but with degraded functionality.
-        // `extractKeywords` will see that `window.nlp` is undefined and will simply return an empty array.
+        // degrade gracefully
     }
-    
+
     const settingsHtml = createSettingsUI();
     $('#extensions_settings').append(settingsHtml);
-    
-    // FIX UI BUBBLING - USING HARDCODED IDs TO BE SAFE
+
     $('#ragfordummies_container > .inline-drawer-toggle').on('click', function(e) {
         e.preventDefault(); e.stopPropagation();
         $(this).find('.inline-drawer-icon').toggleClass('down up');
@@ -1935,9 +2232,9 @@ async function init() {
         $(this).find('.inline-drawer-icon').toggleClass('down up');
         $(this).next('.inline-drawer-content').slideToggle(200);
     });
-    
+
     attachEventListeners();
-    
+
     let eventSourceToUse = null;
     if (typeof eventSource !== 'undefined') eventSourceToUse = eventSource;
     else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.().eventSource) eventSourceToUse = SillyTavern.getContext().eventSource;
@@ -1950,8 +2247,7 @@ async function init() {
         eventSourceToUse.on('message_swiped', onMessageSwiped);
         eventSourceToUse.on('message_deleted', onMessageDeleted);
         eventSourceToUse.on('message_edited', onMessageEdited);
-        
-        // RAG AND TRACKER INJECTION HOOKS
+
         if (typeof injectContextWithSetExtensionPrompt === 'function') {
             const injectionHandler = (type) => {
                 injectContextWithSetExtensionPrompt(type || 'normal'); // RAG
@@ -1960,13 +2256,13 @@ async function init() {
             eventSourceToUse.on('GENERATION_AFTER_COMMANDS', injectionHandler);
             eventSourceToUse.on('generate_before_combine_prompts', () => injectionHandler('normal'));
         }
-        
-        // --- TRACKER OUTPUT PARSING ---
-        eventSourceToUse.on('chat_completion_processed', tracker_onReplyProcessed);
-        
-        // --- NEW: DOM INJECTION HOOK ---
-        eventSourceToUse.on('character_message_rendered', onCharacterMessageRendered);
 
+        eventSourceToUse.on('chat_completion_processed', tracker_onReplyProcessed);
+
+        eventSourceToUse.on('character_message_rendered', (arg) => {
+            console.log(`[${MODULE_NAME}] [FUCKTRACKER] character_message_rendered payload:`, arg);
+            onCharacterMessageRendered(arg);
+        });
 
         eventsRegistered = true;
         console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
@@ -1976,7 +2272,6 @@ async function init() {
         usePolling = true;
     }
 
-    // Always start polling if autoIndex is on
     if (extensionSettings.autoIndex) {
         await startPolling();
     }
@@ -1999,10 +2294,9 @@ async function init() {
             }
         }
     }, 500);
-    
-    // Init the debug display in settings
+
     tracker_updateSettingsDebug();
-    
+
     console.log('[' + MODULE_NAME + '] Extension loaded successfully');
     updateUI('status', 'Extension loaded');
 }
