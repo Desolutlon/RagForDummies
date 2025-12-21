@@ -1592,20 +1592,38 @@ async function onMessageEdited(data) {
     if (!extensionSettings.enabled) return;
     const chatId = getCurrentChatId();
     if (!chatId) return;
+
     const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
+
     if (!currentChatIndexed) {
-        try { if (await countPoints(collectionName) === 0) return; currentChatIndexed = true; } catch (e) { return; }
+        try {
+            if (await countPoints(collectionName) === 0) return;
+            currentChatIndexed = true;
+        } catch (e) {
+            return;
+        }
     }
-    const messageIndex = typeof data === 'number' ? data : (data && typeof data.index === 'number' ? data.index : null);
+
+    const messageIndex = typeof data === 'number'
+        ? data
+        : (data && typeof data.index === 'number' ? data.index : null);
+
     if (messageIndex === null) return;
+
     try {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
         else if (typeof getContext === 'function') context = getContext();
+
         if (!context?.chat?.[messageIndex]) return;
         const message = context.chat[messageIndex];
+
+        // Always use current state location for indexing QoL
+        ft_stampAssistantLocationForIndexing(message);
+
         await deleteMessageByIndex(collectionName, chatId, messageIndex);
         await indexSingleMessage(message, chatId, messageIndex, isCurrentChatGroupChat());
+
         console.log('[' + MODULE_NAME + '] Edit: re-indexed message ' + messageIndex);
     } catch (err) {
         console.error('[' + MODULE_NAME + '] Edit reindex failed:', err);
