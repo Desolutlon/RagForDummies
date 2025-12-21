@@ -1798,7 +1798,7 @@ const tracker_onReplyProcessed = (data) => {
     if (!data || typeof data.text !== 'string') return data;
 
     const rawMsg = data.text;
-    const regex = /⦗([\s\S]*?)⦘/;
+    const regex = /^\s*⦗([\s\S]*?)⦘\s*/;
     const match = rawMsg.match(regex);
 
     // Snapshot time for THIS assistant message before we advance clock
