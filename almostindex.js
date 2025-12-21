@@ -1614,6 +1614,7 @@ async function onMessageEdited(data) {
 
 async function startPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
+
     pollingInterval = setInterval(async () => {
         try {
             if (isIndexing) return;
@@ -1621,10 +1622,12 @@ async function startPolling() {
 
             const chatId = getCurrentChatId();
             if (!chatId) return;
+
             let context = null;
             if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
             else if (typeof getContext === 'function') context = getContext();
             if (!context?.chat) return;
+
             const isGroupChat = isCurrentChatGroupChat();
 
             if (!currentChatIndexed) {
@@ -1638,6 +1641,9 @@ async function startPolling() {
             if (!eventsRegistered) {
                 if (context.chat.length > lastMessageCount) {
                     for (let i = lastMessageCount; i < context.chat.length; i++) {
+                        // Always use current state location for indexing QoL (assistant only; helper no-ops for user)
+                        ft_stampAssistantLocationForIndexing(context.chat[i]);
+
                         await indexSingleMessage(context.chat[i], chatId, i, isGroupChat);
                         indexedMessageIds.add(i);
                     }
@@ -1656,7 +1662,11 @@ async function startPolling() {
                     console.log('[' + MODULE_NAME + '] [Qvlink Sync] Summary changed for message ' + i + '. Re-indexing...');
                     updateUI('status', '↻ Syncing summary for msg #' + i);
                     lastKnownSummaries.set(i, currentSum);
+
                     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
+
+                    ft_stampAssistantLocationForIndexing(msg);
+
                     await deleteMessageByIndex(collectionName, chatId, i);
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
 
@@ -1666,12 +1676,10 @@ async function startPolling() {
                             statusEl.textContent = 'Ready';
                         }
                     }, 2000);
-                }
-                else if (!lastKnownSummaries.has(i)) {
+                } else if (!lastKnownSummaries.has(i)) {
                     lastKnownSummaries.set(i, currentSum);
                 }
             }
-
         } catch (e) {
             console.warn('[' + MODULE_NAME + '] Polling error:', e.message);
         }
