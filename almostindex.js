@@ -16,7 +16,7 @@ const MODULE_LOG_WHITELIST = [
     'TRACKER',
     'FUCKTRACKER',
     'JSON Parse',
-    'injected successfully' // For the new DOM injection confirmation
+    'injected successfully'
 ];
 
 // Allow detailed confirmations and hybrid search traces
@@ -49,7 +49,7 @@ console.log = function(...args) {
         const whitelisted = MODULE_LOG_WHITELIST.some(k => msg.indexOf(k) !== -1);
         const allowSubstr = MODULE_LOG_ALLOW_SUBSTR.some(k => msg.indexOf(k) !== -1);
         if (!whitelisted && !allowSubstr) {
-            return; // suppress non-whitelisted/non-allowed module logs
+            return;
         }
     }
     __origConsoleLog(...args);
@@ -66,18 +66,14 @@ console.log = function(...args) {
  * - Everything else is user-defined fields (titles) returned by the AI JSON.
  */
 window.RagTrackerState = {
-    // Computed time (NOT AI-guided)
-    _clockMs: null, // epoch ms
+    _clockMs: null,
     time: "Unknown",
 
-    // Required fields (AI)
     location: "Unknown",
     topic: "None",
 
-    // Optional convenience (still used by older UI/debug + potential user field)
     tone: "Neutral",
 
-    // Dynamic fields store (everything else)
     fields: {},
 
     initClockFromSettingsAndChat: function() {
@@ -91,7 +87,6 @@ window.RagTrackerState = {
             startMs = d.getTime();
         }
 
-        // advance based on existing assistant messages (stable on reload)
         let ctx = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) ctx = SillyTavern.getContext();
         else if (typeof getContext === 'function') ctx = getContext();
@@ -138,7 +133,6 @@ window.RagTrackerState = {
         this.time = this.formatClock(this._clockMs);
     },
 
-    // Applies parsed JSON to state (ignores AI time/date)
     updateFromJSON: function(data) {
         if (!data || typeof data !== 'object') return;
 
@@ -147,7 +141,6 @@ window.RagTrackerState = {
 
         if (typeof data.Tone === 'string' && data.Tone.trim()) this.tone = data.Tone.trim();
 
-        // Dynamic: store everything except forbidden keys (AI must not guide time)
         const forbidden = new Set(["Time", "Date", "Datetime", "Day", "Clock"]);
         for (const [k, v] of Object.entries(data)) {
             if (forbidden.has(k)) continue;
@@ -160,10 +153,9 @@ window.RagTrackerState = {
     getFormattedDate: function() { return this.time; }
 };
 
-// Per-message snapshots so old messages don't show latest state
 window.FuckTrackerSnapshots = {
     byMesId: Object.create(null),
-    pending: [], // fallback if mesid isn't available at processing time
+    pending: [],
 };
 
 function ft_getMesIdFromEventArg(arg) {
@@ -201,6 +193,69 @@ function ft_findMesElementByMesId(mesId) {
         || document.querySelector(`.mes[mesid="${CSS.escape(id)}"]`);
 }
 
+function ft_ensureMessageTrackerLocation(message, locationStr) {
+    if (!message || typeof locationStr !== 'string') return;
+    const loc = locationStr.trim();
+    if (!loc) return;
+
+    const nameKey = message.name || message.character || 'Unknown';
+
+    message.tracker = message.tracker || {};
+    message.tracker.Characters = message.tracker.Characters || {};
+    message.tracker.Characters[nameKey] = message.tracker.Characters[nameKey] || {};
+    message.tracker.Characters[nameKey].Location = loc;
+}
+
+function ft_stampAssistantTrackerForIndexing(message) {
+    if (!extensionSettings.trackerEnabled) return;
+    if (!message || message.is_system) return;
+    if (message.is_user) return;
+
+    const state = window.RagTrackerState;
+    if (!state) return;
+
+    const topic = (typeof state.topic === 'string' ? state.topic.trim() : '');
+    const tone = (typeof state.tone === 'string' ? state.tone.trim() : '');
+    const location = (typeof state.location === 'string' ? state.location.trim() : '');
+
+    message.tracker = message.tracker || {};
+
+    if (topic && topic !== 'None') {
+        message.tracker.Topic = topic;
+        message.tracker.Topics = message.tracker.Topics || {};
+        message.tracker.Topics.PrimaryTopic = topic;
+    }
+
+    if (tone && tone !== 'Neutral') {
+        message.tracker.Topics = message.tracker.Topics || {};
+        message.tracker.Topics.EmotionalTone = tone;
+    }
+
+    if (location && location !== 'Unknown') {
+        ft_ensureMessageTrackerLocation(message, location);
+    }
+}
+
+function ft_stripLeadingTrackerBlockFromMesTextEl(mesTextEl) {
+    if (!mesTextEl) return false;
+
+    const re = /^\s*⦗[\s\S]*?⦘\s*/;
+
+    const html = mesTextEl.innerHTML;
+    if (re.test(html)) {
+        mesTextEl.innerHTML = html.replace(re, '').trim();
+        return true;
+    }
+
+    const txt = mesTextEl.textContent;
+    if (re.test(txt)) {
+        mesTextEl.textContent = txt.replace(re, '').trim();
+        return true;
+    }
+
+    return false;
+}
+
 // Extension settings with defaults
 const defaultSettings = {
     enabled: true,
@@ -222,14 +277,12 @@ const defaultSettings = {
     excludeLastMessages: 2,
     userBlacklist: '',
 
-    // --- FUCK TRACKER SETTINGS ---
     trackerEnabled: true,
     trackerInline: true,
     trackerTimeStep: 15,
     trackerContextDepth: 10,
     trackerStartDate: new Date().toISOString().split('T')[0] + "T08:00",
 
-    // NEW: user-configurable fields (Location/Topic required + locked)
     trackerFields: [
         {
             title: "Location",
@@ -357,7 +410,6 @@ function injectTrackerCSS() {
 // ===========================
 
 function tracker_initDate() {
-    // Time/Date is now JS-driven via RagTrackerState.initClockFromSettingsAndChat()
 }
 
 function tracker_updateSettingsDebug() {
@@ -396,7 +448,6 @@ function ft_ensureRequiredFields() {
         });
     }
 
-    // Ensure required are locked
     fields = fields.map(f => {
         if (f?.title === "Location" || f?.title === "Topic") {
             return { ...f, locked: true, required: true };
@@ -507,7 +558,6 @@ function getUserBlacklistSet() {
     );
 }
 
-// Helper: topic tokens (used for keyword matching in hybrid search)
 function extractTopicTerms(topic, excludeNames = new Set()) {
     if (!topic || typeof topic !== 'string') return [];
     const userBlacklist = getUserBlacklistSet();
@@ -529,7 +579,6 @@ function extractTopicTerms(topic, excludeNames = new Set()) {
     return Array.from(new Set(out));
 }
 
-// HELPER: Aggressively strips names (and possessives) from text
 function sanitizeTextForKeywords(text, namesSet) {
     let cleanText = text;
     const sortedNames = Array.from(namesSet).sort((a, b) => b.length - a.length);
@@ -763,7 +812,6 @@ function convertTextToJSONL(text) {
     });
     return lines.join('\n');
 }
-
 // ===========================
 // Qdrant Client Functions
 // ===========================
@@ -1031,7 +1079,6 @@ async function generateOpenAIEmbedding(text) {
     const embeddings = data.data.map(d => d.embedding);
     return isArray ? embeddings : embeddings[0];
 }
-
 // ===========================
 // JSONL Parsing and Indexing
 // ===========================
@@ -1075,6 +1122,7 @@ function buildEmbeddingText(message, tracker) {
     parts.push('\nMessage: ' + message.mes);
     return parts.join(' ');
 }
+
 function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     const tracker = message.tracker || {};
     let charactersPresent = (message.present && Array.isArray(message.present))
@@ -1094,11 +1142,11 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
 
     const allKeywords = new Set([...properNounCandidates, ...commonKeywordCandidates]);
 
-    // 
     const trackerTopic =
         (tracker.Topics && tracker.Topics.PrimaryTopic) ||
         (tracker.Topic) ||
         '';
+
     const topicTerms = extractTopicTerms(trackerTopic, participantNames);
     topicTerms.forEach(t => allKeywords.add(t));
 
@@ -1113,7 +1161,7 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
         summary: summary,
         full_message: message.mes,
         characters_present: charactersPresent,
-        topic: (tracker.Topics && tracker.Topics.PrimaryTopic) || '',
+        topic: (tracker.Topics && tracker.Topics.PrimaryTopic) || (tracker.Topic || ''),
         emotional_tone: (tracker.Topics && tracker.Topics.EmotionalTone) || '',
         location: (tracker.Characters && tracker.Characters[message.name] && tracker.Characters[message.name].Location) || '',
         proper_nouns: Array.from(allKeywords)
@@ -1151,11 +1199,6 @@ function getQueryMessage(context, idxOverride, generationType) {
     return lastMsg;
 }
 
-/**
- * Constructs a query string from multiple messages.
- * Respects group chat presence logic.
- * NEW: Injects ONLY Topic (Location removed as requested).
- */
 function constructMultiMessageQuery(context, generationType) {
     const anchorMsg = getQueryMessage(context, null, generationType);
     if (!anchorMsg) return "";
@@ -1192,7 +1235,6 @@ function constructMultiMessageQuery(context, generationType) {
 
     let query = collectedText.join('\n');
 
-    // 
     if (extensionSettings.trackerEnabled) {
         const t = window.RagTrackerState;
         if (t && typeof t.topic === 'string' && t.topic.trim()) {
@@ -1308,7 +1350,6 @@ async function indexSingleMessage(message, chatIdHash, messageIndex, isGroupChat
         return false;
     }
 }
-
 // ===========================
 // Context Retrieval
 // ===========================
@@ -1328,15 +1369,11 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
 
         const participantNames = getParticipantNames(null);
 
-        // Dense vector keeps names
         const queryEmbedding = await generateEmbedding(query);
 
-        // Keyword filter strips names
         const textForKeywords = sanitizeTextForKeywords(query, participantNames);
         const queryFilterTerms = extractQueryFilterTerms(textForKeywords, participantNames);
 
-        // 
-        // This preserves your existing query behavior but guarantees Topic participates in hybrid filtering.
         const topicTerms = extractTopicTerms(window.RagTrackerState?.topic, participantNames);
         const merged = new Set(queryFilterTerms);
         topicTerms.forEach(t => merged.add(t));
@@ -1402,7 +1439,7 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
 
         if (budgetHit) {
             const warningMsg = `(RAG Budget reached! Only injecting ${contextParts.length} entries!)`;
-            updateUI('status', '⚠️ ' + warningMsg);
+            updateUI('status', warningMsg);
             if (typeof toastr !== 'undefined') {
                 toastr.warning(warningMsg, 'RagForDummies');
             }
@@ -1416,6 +1453,7 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         return '';
     }
 }
+
 function getCurrentChatId() {
     try {
         let context = null;
@@ -1427,6 +1465,7 @@ function getCurrentChatId() {
         return null;
     }
 }
+
 function getActiveCharacterName() {
     try {
         let context = null;
@@ -1439,6 +1478,7 @@ function getActiveCharacterName() {
     }
     return null;
 }
+
 function isCurrentChatGroupChat() {
     try {
         let context = null;
@@ -1462,26 +1502,21 @@ async function onChatLoaded() {
     window.FuckTrackerSnapshots.byMesId = Object.create(null);
     window.FuckTrackerSnapshots.pending = [];
 
-    if (extensionSettings.trackerEnabled) {
-        window.RagTrackerState.initClockFromSettingsAndChat();
-        tracker_updateSettingsDebug();
-    }
+    window.RagTrackerState.initClockFromSettingsAndChat();
+    tracker_updateSettingsDebug();
 
     console.log('[' + MODULE_NAME + '] Chat loaded. Chat ID:', chatId);
     updateUI('status', 'Chat loaded - checking index...');
-
     try {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
         else if (typeof getContext === 'function') context = getContext();
-
         if (context && context.chat) {
             lastMessageCount = context.chat.length;
             context.chat.forEach((msg, idx) => {
                 lastKnownSummaries.set(idx, getSummaryFromMsg(msg));
             });
         }
-
         if (chatId) {
             const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
             const pointCount = await countPoints(collectionName);
@@ -1517,21 +1552,18 @@ async function onMessageSent(messageData) {
         await indexSingleMessage(messageData, chatId, SillyTavern.getContext().chat.length - 1, isGroupChat);
     }
 }
+
 async function onMessageReceived(messageData) {
     if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
     const chatId = getCurrentChatId();
     if (!chatId) return;
-
     if (currentChatIndexed && typeof SillyTavern !== 'undefined') {
         try {
             const context = SillyTavern.getContext();
             if (context.chat && context.chat.length > 0) {
                 const messageIndex = context.chat.length - 1;
-
                 if (!indexedMessageIds.has(messageIndex)) {
-                    // Always use current state location for indexing QoL
-                    ft_stampAssistantLocationForIndexing(context.chat[messageIndex]);
-
+                    ft_stampAssistantTrackerForIndexing(context.chat[messageIndex]);
                     await indexSingleMessage(context.chat[messageIndex], chatId, messageIndex, isCurrentChatGroupChat());
                     indexedMessageIds.add(messageIndex);
                     lastMessageCount = context.chat.length;
@@ -1542,31 +1574,25 @@ async function onMessageReceived(messageData) {
         }
     }
 }
+
 async function onMessageSwiped(data) {
     if (!extensionSettings.enabled) return;
     const chatId = getCurrentChatId();
     if (!chatId) return;
-
     const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
     let targetIndex = (typeof data === 'number') ? data : (data && typeof data.index === 'number' ? data.index : null);
-
     (async () => {
         try {
             if (!currentChatIndexed && await countPoints(collectionName) === 0) return;
             currentChatIndexed = true;
-
             const context = await (async (idx, maxWaitMs = 2500) => {
                 const start = Date.now();
                 const readCtx = () => {
-                    const ctx = typeof SillyTavern !== 'undefined'
-                        ? SillyTavern.getContext()
-                        : (typeof getContext === 'function' ? getContext() : null);
+                    const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
                     return { ctx, mes: (ctx?.chat?.[idx])?.mes || null };
                 };
-
                 const { mes: initial } = readCtx();
                 let lastSeen = initial, stableCount = 0;
-
                 while (Date.now() - start < maxWaitMs) {
                     await new Promise(res => setTimeout(res, 100));
                     const { ctx, mes } = readCtx();
@@ -1576,26 +1602,23 @@ async function onMessageSwiped(data) {
                 }
                 return readCtx().ctx;
             })(targetIndex !== null ? targetIndex : (SillyTavern.getContext()?.chat.length - 1 || 0));
-
             if (!context?.chat?.length) return;
             if (targetIndex === null || targetIndex < 0 || targetIndex >= context.chat.length) targetIndex = context.chat.length - 1;
-
             const message = context.chat[targetIndex];
             if (!message) return;
 
-            // Always use current state location for indexing QoL
-            ft_stampAssistantLocationForIndexing(message);
+            ft_stampAssistantTrackerForIndexing(message);
 
             await deleteMessageByIndex(collectionName, chatId, targetIndex);
             await indexSingleMessage(message, chatId, targetIndex, isCurrentChatGroupChat());
             indexedMessageIds.add(targetIndex);
-
             console.log('[' + MODULE_NAME + '] Swipe: re-indexed message ' + targetIndex);
         } catch (err) {
             console.error('[' + MODULE_NAME + '] Swipe reindex failed:', err);
         }
     })();
 }
+
 async function onMessageDeleted(data) {
     if (!extensionSettings.enabled) return;
     const chatId = getCurrentChatId();
@@ -1610,42 +1633,28 @@ async function onMessageDeleted(data) {
     indexedMessageIds.delete(messageIndex);
     lastKnownSummaries.delete(messageIndex);
 }
+
 async function onMessageEdited(data) {
     if (!extensionSettings.enabled) return;
     const chatId = getCurrentChatId();
     if (!chatId) return;
-
     const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
-
     if (!currentChatIndexed) {
-        try {
-            if (await countPoints(collectionName) === 0) return;
-            currentChatIndexed = true;
-        } catch (e) {
-            return;
-        }
+        try { if (await countPoints(collectionName) === 0) return; currentChatIndexed = true; } catch (e) { return; }
     }
-
-    const messageIndex = typeof data === 'number'
-        ? data
-        : (data && typeof data.index === 'number' ? data.index : null);
-
+    const messageIndex = typeof data === 'number' ? data : (data && typeof data.index === 'number' ? data.index : null);
     if (messageIndex === null) return;
-
     try {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
         else if (typeof getContext === 'function') context = getContext();
-
         if (!context?.chat?.[messageIndex]) return;
         const message = context.chat[messageIndex];
 
-        // Always use current state location for indexing QoL
-        ft_stampAssistantLocationForIndexing(message);
+        ft_stampAssistantTrackerForIndexing(message);
 
         await deleteMessageByIndex(collectionName, chatId, messageIndex);
         await indexSingleMessage(message, chatId, messageIndex, isCurrentChatGroupChat());
-
         console.log('[' + MODULE_NAME + '] Edit: re-indexed message ' + messageIndex);
     } catch (err) {
         console.error('[' + MODULE_NAME + '] Edit reindex failed:', err);
@@ -1654,7 +1663,6 @@ async function onMessageEdited(data) {
 
 async function startPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
-
     pollingInterval = setInterval(async () => {
         try {
             if (isIndexing) return;
@@ -1662,12 +1670,10 @@ async function startPolling() {
 
             const chatId = getCurrentChatId();
             if (!chatId) return;
-
             let context = null;
             if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
             else if (typeof getContext === 'function') context = getContext();
             if (!context?.chat) return;
-
             const isGroupChat = isCurrentChatGroupChat();
 
             if (!currentChatIndexed) {
@@ -1681,9 +1687,7 @@ async function startPolling() {
             if (!eventsRegistered) {
                 if (context.chat.length > lastMessageCount) {
                     for (let i = lastMessageCount; i < context.chat.length; i++) {
-                        // Always use current state location for indexing QoL (assistant only; helper no-ops for user)
-                        ft_stampAssistantLocationForIndexing(context.chat[i]);
-
+                        ft_stampAssistantTrackerForIndexing(context.chat[i]);
                         await indexSingleMessage(context.chat[i], chatId, i, isGroupChat);
                         indexedMessageIds.add(i);
                     }
@@ -1700,12 +1704,11 @@ async function startPolling() {
 
                 if (lastKnownSummaries.has(i) && currentSum !== knownSum) {
                     console.log('[' + MODULE_NAME + '] [Qvlink Sync] Summary changed for message ' + i + '. Re-indexing...');
-                    updateUI('status', '↻ Syncing summary for msg #' + i);
+                    updateUI('status', 'Syncing summary for msg #' + i);
                     lastKnownSummaries.set(i, currentSum);
-
                     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
 
-                    ft_stampAssistantLocationForIndexing(msg);
+                    ft_stampAssistantTrackerForIndexing(msg);
 
                     await deleteMessageByIndex(collectionName, chatId, i);
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
@@ -1716,10 +1719,12 @@ async function startPolling() {
                             statusEl.textContent = 'Ready';
                         }
                     }, 2000);
-                } else if (!lastKnownSummaries.has(i)) {
+                }
+                else if (!lastKnownSummaries.has(i)) {
                     lastKnownSummaries.set(i, currentSum);
                 }
             }
+
         } catch (e) {
             console.warn('[' + MODULE_NAME + '] Polling error:', e.message);
         }
@@ -1811,7 +1816,9 @@ Analyze the last ${contextDepth} messages and the current scenario.
 CRITICAL RULES:
 - DO NOT output Time/Date fields. Time/Date are computed by the application and must not be invented.
 - You MUST output a hidden JSON block between ⦗ and ⦘ at the very start of your response.
-- After the JSON block, you MUST output the character's normal dialogue/response.
+- After the JSON block, you MUST output the character's normal reply in the same style as the chat.
+- Preserve roleplay formatting exactly (asterisks for actions, quotes, Markdown, punctuation). Do not sanitize or change style.
+- Do not mention the tracker or its fields in the dialogue. Tracker data belongs only inside the JSON block.
 - Output ONLY the fields listed below. Do not add extra keys.
 
 Output Format:
@@ -1849,7 +1856,6 @@ const tracker_onReplyProcessed = (data) => {
     const regex = /^\s*⦗([\s\S]*?)⦘\s*/;
     const match = rawMsg.match(regex);
 
-    // Snapshot time for THIS assistant message before we advance clock
     if (!Number.isFinite(window.RagTrackerState._clockMs)) {
         window.RagTrackerState.initClockFromSettingsAndChat();
     }
@@ -1862,7 +1868,6 @@ const tracker_onReplyProcessed = (data) => {
 
             window.RagTrackerState.updateFromJSON(parsedData);
 
-            // snapshot for this message
             const snapshot = {
                 time: messageTime,
                 location: window.RagTrackerState.location,
@@ -1890,7 +1895,6 @@ const tracker_onReplyProcessed = (data) => {
         }
     }
 
-    // advance clock per assistant message (as requested)
     window.RagTrackerState.advanceClock();
     tracker_updateSettingsDebug();
 
@@ -1921,9 +1925,8 @@ function ft_buildTrackerHtmlFromSnapshot(snapshot) {
         return ft_renderValue(fields[title]);
     };
 
-    // mix: first three full width; rest can be half width if you want later
     const cells = titles.map((title, idx) => {
-        const full = (idx < 3) ? 'full-width' : 'full-width'; // keep full-width for readability
+        const full = (idx < 3) ? 'full-width' : 'full-width';
         return `
         <div class="ft-cell ${full}">
             <div class="ft-label">${ft_escapeHtml(title)}</div>
@@ -1950,7 +1953,6 @@ async function onCharacterMessageRendered(eventArg) {
     let mesEl = null;
     let mesTextEl = null;
 
-    // Fallback: if mesId is not provided by your ST build, target the last assistant message element
     const findFallbackLastAssistantMes = () => {
         const all = Array.from(document.querySelectorAll('#chat .mes'));
         for (let i = all.length - 1; i >= 0; i--) {
@@ -1963,11 +1965,8 @@ async function onCharacterMessageRendered(eventArg) {
     };
 
     while (Date.now() - start < maxWaitMs) {
-        if (mesId != null) {
-            mesEl = ft_findMesElementByMesId(mesId);
-        } else {
-            mesEl = findFallbackLastAssistantMes();
-        }
+        if (mesId != null) mesEl = ft_findMesElementByMesId(mesId);
+        else mesEl = findFallbackLastAssistantMes();
 
         if (mesEl) {
             if (mesEl.classList.contains('user_mes')) return;
@@ -1984,7 +1983,6 @@ async function onCharacterMessageRendered(eventArg) {
 
     if (mesEl.querySelector('.ft-tracker-display')) return;
 
-    // If the tracker block is still visible in the message text, remove it from the rendered DOM
     ft_stripLeadingTrackerBlockFromMesTextEl(mesTextEl);
 
     let snapshot = null;
@@ -2002,7 +2000,6 @@ async function onCharacterMessageRendered(eventArg) {
     }
 
     const trackerHtml = ft_buildTrackerHtmlFromSnapshot(snapshot);
-
     mesTextEl.insertAdjacentHTML('beforebegin', trackerHtml);
 
     console.log(`[${MODULE_NAME}] [FUCKTRACKER] Injected tracker header`, { mesId });
@@ -2036,13 +2033,22 @@ function createSettingsUI() {
                 <div class="ragfordummies-settings">
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
 
-                    <!-- FUCK TRACKER SECTION -->
                     <div class="ragfordummies-section">
                         <div id="rag_tracker_drawer" class="inline-drawer">
                             <div class="inline-drawer-toggle inline-drawer-header"><b>Fuck Tracker</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down"></div></div>
                             <div class="inline-drawer-content">
                                 <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_enabled" ${extensionSettings.trackerEnabled ? 'checked' : ''} />Enable State Tracking</label>
                                 <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_inline" ${extensionSettings.trackerInline ? 'checked' : ''} />Show Tracker Header</label>
+
+                                <div class="flex-container">
+                                    <label>Minutes per assistant message</label>
+                                    <input type="number" id="ragfordummies_tracker_time_step" class="text_pole" value="${extensionSettings.trackerTimeStep}" min="1" max="1440">
+                                </div>
+
+                                <div class="flex-container">
+                                    <label>Start date/time</label>
+                                    <input type="datetime-local" id="ragfordummies_tracker_start_date" class="text_pole" value="${String(extensionSettings.trackerStartDate).slice(0,16)}">
+                                </div>
 
                                 <div class="flex-container">
                                     <label>Context Depth</label>
@@ -2067,12 +2073,11 @@ function createSettingsUI() {
                             </div>
                         </div>
                     </div>
-                    <!-- END TRACKER -->
 
                     <div class="ragfordummies-section"><h4>Qdrant Configuration</h4><label><span>Local URL:</span><input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" placeholder="http://localhost:6333" /></label></div>
                     <div class="ragfordummies-section"><h4>Embedding Provider</h4><label><span>Provider:</span><select id="ragfordummies_embedding_provider"><option value="kobold" ${extensionSettings.embeddingProvider === 'kobold' ? 'selected' : ''}>KoboldCpp</option><option value="ollama" ${extensionSettings.embeddingProvider === 'ollama' ? 'selected' : ''}>Ollama</option><option value="openai" ${extensionSettings.embeddingProvider === 'openai' ? 'selected' : ''}>OpenAI</option></select></label><label id="ragfordummies_kobold_settings" style="${extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none'}"><span>KoboldCpp URL:</span><input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" placeholder="http://localhost:11434" /></label><div id="ragfordummies_ollama_settings" style="${extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none'}"><label><span>Ollama URL:</span><input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" placeholder="http://localhost:11434" /></label><label><span>Ollama Model:</span><input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" placeholder="nomic-embed-text" /></label></div><div id="ragfordummies_openai_settings" style="${extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none'}"><label><span>OpenAI API Key:</span><input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" placeholder="sk-..." /></label><label><span>OpenAI Model:</span><input type="text" id="ragfordummies_openai_model" value="${extensionSettings.openaiModel}" placeholder="text-embedding-3-small" /></label></div></div>
                     <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Query Context Messages:</span><input type="number" id="ragfordummies_query_message_count" value="${extensionSettings.queryMessageCount}" min="1" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">How many recent messages to combine for the search query. Higher = better topic understanding.</small></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /><small style="opacity:0.7; display:block; margin-top:5px;">Budget for injected context. Lower budget = less context injected (least relevant information will be thrown away)</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
-                    <div class="ragfordummies-section"><h4>Custom Keyword Blacklist</h4><label><span>Blacklisted Terms (comma-separated):</span><input type="text" id="ragfordummies_user_blacklist" value="${extensionSettings.userBlacklist || ''}" placeholder="baka, sweetheart, darling" /></label><small style="opacity:0.7; display:block; margin-top:5px;">Can be useful for things like pet names between you and your character appearing in the hybrid search. (Most likely not needed, as vector scoring takes care of this.) Do not touch unless you know what you're doing.</small></div>
+                    <div class="ragfordummies-section"><h4>Custom Keyword Blacklist</h4><label><span>Blacklisted Terms (comma-separated):</span><input type="text" id="ragfordummies_user_blacklist" value="${extensionSettings.userBlacklist || ''}" placeholder="baka, sweetheart, darling" /></label><small style="opacity:0.7; display:block; margin-top:5px;">Can be useful for things like pet names between you and your character appearing in the hybrid search. Do not touch unless you know what you're doing.</small></div>
                     <div class="ragfordummies-section"><h4>Context Injection Position</h4><label><span>Injection Position:</span><select id="ragfordummies_injection_position"><option value="before_main" ${extensionSettings.injectionPosition === 'before_main' ? 'selected' : ''}>Before Main Prompt</option><option value="after_main" ${extensionSettings.injectionPosition === 'after_main' ? 'selected' : ''}>After Main Prompt</option><option value="after_messages" ${extensionSettings.injectionPosition === 'after_messages' ? 'selected' : ''}>After X Messages</option></select></label><label id="ragfordummies_inject_after_messages_setting" style="${extensionSettings.injectionPosition === 'after_messages' ? '' : 'display:none'}"><span>Messages from End:</span><input type="number" id="ragfordummies_inject_after_messages" value="${extensionSettings.injectAfterMessages}" min="0" max="50" /><small style="opacity:0.7; display:block; margin-top:5px;">0 = at the very end, 3 = after last 3 messages</small></label></div>
                     <div class="ragfordummies-section"><h4>Manual Operations</h4><button id="ragfordummies_index_current" class="menu_button">Index Current Chat</button><button id="ragfordummies_force_reindex" class="menu_button">Force Re-index (Rebuild)</button><button id="ragfordummies_stop_indexing" class="menu_button ragfordummies-stop-btn">Stop Indexing</button><hr style="border-color: var(--SmartThemeBorderColor); margin: 10px 0;" /><label class="checkbox_label" style="margin-bottom: 8px;"><input type="checkbox" id="ragfordummies_merge_uploads" checked /><span>Merge uploads into current chat collection</span></label><button id="ragfordummies_upload_btn" class="menu_button">Upload File (JSONL or txt)</button><input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" /><div id="ragfordummies_status" class="ragfordummies-status">Ready</div></div>
                 </div>
@@ -2087,7 +2092,6 @@ function attachEventListeners() {
         'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index',
         'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
         'max_token_budget',
-        // Tracker settings
         'tracker_enabled', 'tracker_time_step', 'tracker_inline', 'tracker_start_date', 'tracker_context_depth'
     ];
     settingIds.forEach(id => {
@@ -2103,7 +2107,12 @@ function attachEventListeners() {
                     if (element.checked && !pollingInterval) startPolling();
                     else if (!element.checked && pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
                 }
-                if (id === 'tracker_start_date') tracker_initDate();
+
+                if (id === 'tracker_start_date' || id === 'tracker_time_step') {
+                    window.RagTrackerState.initClockFromSettingsAndChat();
+                    tracker_updateSettingsDebug();
+                }
+
                 saveSettings();
             });
         }
@@ -2123,11 +2132,11 @@ function attachEventListeners() {
     document.getElementById('ragfordummies_index_current')?.addEventListener('click', async () => {
         try {
             const chatId = getCurrentChatId();
-            if (!chatId) { updateUI('status', '✗ No active chat found'); return; }
+            if (!chatId) { updateUI('status', 'No active chat found'); return; }
             await indexChat(convertChatToJSONL(SillyTavern.getContext()), chatId, isCurrentChatGroupChat());
             currentChatIndexed = true;
         } catch (error) {
-            updateUI('status', '✗ Indexing failed: ' + error.message);
+            updateUI('status', 'Indexing failed: ' + error.message);
         }
     });
 
@@ -2135,9 +2144,9 @@ function attachEventListeners() {
         if (!confirm('This will delete and rebuild the index. Continue?')) return;
         try {
             await forceReindexCurrentChat();
-            updateUI('status', '✓ Force re-index complete!');
+            updateUI('status', 'Force re-index complete');
         } catch (error) {
-            updateUI('status', '✗ Force re-index failed: ' + error.message);
+            updateUI('status', 'Force re-index failed: ' + error.message);
         }
     });
 
@@ -2175,7 +2184,7 @@ function attachEventListeners() {
                     if (parsed.chatMetadata?.chat_id_hash) targetChatId = parsed.chatMetadata.chat_id_hash;
                 }
                 await indexChat(jsonlToIndex, targetChatId, targetIsGroupChat);
-                updateUI('status', shouldMerge ? '✓ Merged into current chat!' : '✓ Uploaded file indexed.');
+                updateUI('status', shouldMerge ? 'Merged into current chat' : 'Uploaded file indexed');
             } catch (error) {
                 updateUI('status', 'Upload failed: ' + error.message);
             }
@@ -2183,7 +2192,6 @@ function attachEventListeners() {
         });
     }
 
-    // Tracker fields UI wiring
     ft_ensureRequiredFields();
     ft_renderFieldsUI();
 
@@ -2288,39 +2296,30 @@ async function init() {
     try {
         await loadNlpLibrary();
     } catch (error) {
-        // degrade gracefully
     }
 
     const settingsHtml = createSettingsUI();
     $('#extensions_settings').append(settingsHtml);
 
     $('#ragfordummies_container > .inline-drawer-toggle').on('click', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
+        e.preventDefault(); e.stopPropagation();
         $(this).find('.inline-drawer-icon').toggleClass('down up');
         $('#ragfordummies_container .inline-drawer-content').first().slideToggle(200);
     });
-
     $('#rag_tracker_drawer > .inline-drawer-toggle').on('click', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
+        e.preventDefault(); e.stopPropagation();
         $(this).find('.inline-drawer-icon').toggleClass('down up');
         $(this).next('.inline-drawer-content').slideToggle(200);
     });
 
     attachEventListeners();
 
-    // Ensure tracker clock is initialized immediately so UI does not show Unknown
-    if (extensionSettings.trackerEnabled) {
-        window.RagTrackerState.initClockFromSettingsAndChat();
-        tracker_updateSettingsDebug();
-    }
+    window.RagTrackerState.initClockFromSettingsAndChat();
+    tracker_updateSettingsDebug();
 
     let eventSourceToUse = null;
     if (typeof eventSource !== 'undefined') eventSourceToUse = eventSource;
-    else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.().eventSource) {
-        eventSourceToUse = SillyTavern.getContext().eventSource;
-    }
+    else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.().eventSource) eventSourceToUse = SillyTavern.getContext().eventSource;
 
     if (eventSourceToUse) {
         console.log('[' + MODULE_NAME + '] Registering event listeners on eventSource');
@@ -2368,32 +2367,7 @@ async function init() {
                 const pointCount = await countPoints(collectionName);
                 if (pointCount > 0) {
                     currentChatIndexed = true;
-                    updateUI('status', '✓ Indexed (' + pointCount + ' messages)');
-                } else {
-                    updateUI('status', 'Ready to index');
-                }
-            } catch (checkError) {
-                console.log('[' + MODULE_NAME + '] Initial check: Could not verify collection -', checkError.message);
-            }
-        }
-    }, 500);
-
-    tracker_updateSettingsDebug();
-
-    console.log('[' + MODULE_NAME + '] Extension loaded successfully');
-    updateUI('status', 'Extension loaded');
-}
-
-    setTimeout(async () => {
-        console.log('[' + MODULE_NAME + '] Running initial index status check...');
-        const chatId = getCurrentChatId();
-        if (chatId && !currentChatIndexed) {
-            const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
-            try {
-                const pointCount = await countPoints(collectionName);
-                if (pointCount > 0) {
-                    currentChatIndexed = true;
-                    updateUI('status', '✓ Indexed (' + pointCount + ' messages)');
+                    updateUI('status', 'Indexed (' + pointCount + ' messages)');
                 } else {
                     updateUI('status', 'Ready to index');
                 }
