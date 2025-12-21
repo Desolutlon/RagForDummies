@@ -14,7 +14,8 @@ const MODULE_LOG_WHITELIST = [
     'Initial check',
     'Tracker',
     'TRACKER',
-    'TRACKER DEBUG'
+    'TRACKER DEBUG',
+    'JSON Parse'
 ];
 
 // Allow detailed confirmations and hybrid search traces
@@ -52,24 +53,46 @@ console.log = function(...args) {
 };
 
 // =================================================================
-// 1. GLOBAL TRACKER STATE (FuckTracker Engine)
+// 1. GLOBAL TRACKER STATE (FuckTracker Engine V2 - JSON)
 // =================================================================
 window.RagTrackerState = {
-    dateObj: new Date(), 
+    time: "Unknown",
     location: "Unknown",
-    clothing: "Casual",
-    tone: "Neutral",
-    topic: "Greetings",
+    outfit: [],
+    dressState: "Normal",
     action: "Standing",
+    topic: "None",
+    tone: "Neutral",
+    present: [],
+    cash: "Unknown",
+    income: "Unknown",
+    intoxication: "Sober",
+    hunger: "Satiated",
+    excretion: "None",
+    weather: "Unknown",
+
+    // Update state from the parsed JSON block
+    updateFromJSON: function(data) {
+        if (!data) return;
+        if (data.Time) this.time = data.Time;
+        if (data.Location) this.location = data.Location;
+        if (data.Weather) this.weather = data.Weather;
+        if (data.Outfit) this.outfit = Array.isArray(data.Outfit) ? data.Outfit : [data.Outfit];
+        if (data.StateOfDress) this.dressState = data.StateOfDress;
+        if (data.CurrentAction) this.action = data.CurrentAction;
+        if (data.Topic) this.topic = data.Topic;
+        if (data.Tone) this.tone = data.Tone;
+        if (data.CharactersPresent) this.present = Array.isArray(data.CharactersPresent) ? data.CharactersPresent : [data.CharactersPresent];
+        if (data.Cash) this.cash = data.Cash;
+        if (data.Income) this.income = data.Income;
+        if (data.Intoxication) this.intoxication = data.Intoxication;
+        if (data.HungerThirst) this.hunger = data.HungerThirst;
+        if (data.Excretion) this.excretion = data.Excretion;
+        
+        tracker_updateSettingsDebug();
+    },
     
-    // Helper to get formatted string: "10:00 PM; 12/17/2025 (Wednesday)"
-    getFormattedDate: function() {
-        const d = this.dateObj;
-        const timeStr = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-        const dateStr = d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
-        const dayName = d.toLocaleDateString('en-US', { weekday: 'long' });
-        return `${timeStr}; ${dateStr} (${dayName})`;
-    }
+    getFormattedDate: function() { return this.time; }
 };
 
 // Extension settings with defaults
@@ -123,45 +146,53 @@ function injectTrackerCSS() {
     if (document.getElementById(styleId)) return;
 
     const css = `
-        /* The Inline Box (Above Message) */
+        /* The Header Container - Pushed to top of bubble using negative margins */
         .ft-inline-container {
-            font-size: 0.85em;
-            font-family: monospace;
-            margin-bottom: 8px;
-            opacity: 1;
-            display: block; /* Changed to block to force new line */
-            width: 100%;
+            display: block;
+            margin: -10px -10px 15px -10px !important;
+            width: calc(100% + 20px);
+            background-color: rgba(20, 20, 20, 0.4);
+            border-bottom: 2px solid var(--SmartThemeBorderColor);
+            border-radius: 10px 10px 0 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 0.75em;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
         
-        .ft-box {
-            background-color: var(--SmartThemeChatTintColor, rgba(30, 30, 30, 0.6));
-            border: 1px solid var(--SmartThemeBorderColor);
-            border-radius: 6px;
-            display: flex;
-            flex-wrap: wrap;
-            overflow: hidden;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-            padding: 2px 0;
+        .ft-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1px;
+            background-color: rgba(255,255,255,0.1); /* Lines between cells */
         }
 
-        .ft-item {
-            padding: 4px 12px;
+        .ft-cell {
+            background-color: var(--SmartThemeChatTintColor, #1e1e1e);
+            padding: 5px 10px;
             display: flex;
-            align-items: center;
-            gap: 6px;
-            border-right: 1px solid rgba(128,128,128,0.2);
-            flex-grow: 1;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .ft-cell.full-width {
+            grid-column: span 2;
+        }
+
+        .ft-label {
+            text-transform: uppercase;
+            font-weight: 700;
+            font-size: 0.85em;
+            opacity: 0.6;
+            margin-bottom: 2px;
+            letter-spacing: 0.5px;
         }
         
-        .ft-item:last-child { border-right: none; }
-        .ft-label { opacity: 0.8; font-weight: bold; font-size: 0.9em; }
-        .ft-val { font-weight: 600; color: var(--SmartThemeBodyColor); }
-        
-        /* Specific Colors */
-        .ft-time .ft-val { color: #ffcc80; } /* Orange */
-        .ft-loc .ft-val { color: #a5d6a7; }  /* Green */
-        .ft-wear .ft-val { color: #f48fb1; } /* Pink */
-        .ft-tone .ft-val { color: #90caf9; } /* Blue */
+        .ft-val {
+            font-weight: 500;
+            color: var(--SmartThemeBodyColor);
+            line-height: 1.3;
+        }
     `;
 
     const style = document.createElement('style');
@@ -175,44 +206,17 @@ function injectTrackerCSS() {
 // ===========================
 
 function tracker_initDate() {
-    if (extensionSettings.trackerStartDate) {
-        window.RagTrackerState.dateObj = new Date(extensionSettings.trackerStartDate);
-    }
-}
-
-function tracker_advanceTime(minutesToAdd) {
-    if (!extensionSettings.trackerEnabled) return;
-    const current = window.RagTrackerState.dateObj.getTime();
-    const newTime = current + (minutesToAdd * 60000);
-    window.RagTrackerState.dateObj = new Date(newTime);
-    tracker_updateSettingsDebug();
+    // Legacy support, Date is now largely handled by LLM Hallucination/Logic
 }
 
 function tracker_updateSettingsDebug() {
     // Syncs the settings menu inputs with real state
-    $('#ft_manual_loc').val(window.RagTrackerState.location);
-    $('#ft_manual_wear').val(window.RagTrackerState.clothing);
-    $('#ft_manual_tone').val(window.RagTrackerState.tone);
-    $('#ft_debug_time').text(window.RagTrackerState.getFormattedDate());
-}
-
-function tracker_parseStateString(str) {
-    console.log(`[${MODULE_NAME}] [TRACKER DEBUG] Raw AI String: "${str}"`);
-    
-    const parts = str.split('|');
-    parts.forEach(part => {
-        let [key, val] = part.split(':').map(x => x.trim());
-        if (!key || !val) return;
-        key = key.toLowerCase();
-        
-        if (key.includes('loc')) window.RagTrackerState.location = val;
-        if (key.includes('wear')) window.RagTrackerState.clothing = val;
-        if (key.includes('tone')) window.RagTrackerState.tone = val;
-        if (key.includes('topic')) window.RagTrackerState.topic = val;
-        if (key.includes('act')) window.RagTrackerState.action = val;
-    });
-
-    tracker_updateSettingsDebug();
+    const s = window.RagTrackerState;
+    $('#ft_debug_time').html(`
+        <b>Time:</b> ${s.time}<br>
+        <b>Loc:</b> ${s.location}<br>
+        <b>Act:</b> ${s.action}
+    `);
 }
 
 // ===========================
@@ -1484,8 +1488,6 @@ async function injectContextWithSetExtensionPrompt(generationType) {
 // LISTENERS (Tracker + RAG)
 // ===========================
 
-// --- NEW INJECTION LOGIC FOR TRACKER ---
-// Using setExtensionPrompt ensures it works on Chat Completion APIs (Ollama/OpenAI) too
 const tracker_injectInstruction = () => {
     if (!extensionSettings.trackerEnabled) return;
     
@@ -1496,57 +1498,155 @@ const tracker_injectInstruction = () => {
     if (!context || !context.setExtensionPrompt) return;
 
     const s = window.RagTrackerState;
-    const dateStr = s.getFormattedDate(); 
     const contextDepth = extensionSettings.trackerContextDepth || 10;
     
-    // THE SMART PROMPT: INFERENCE LOOP
+    // --- THE MEGA PROMPT (Updated to your specifics) ---
     const instruction = `
-\n[SYSTEM INSTRUCTION: STATE TRACKING ENGINE]
-1. Current Simulation Date: ${dateStr}.
-2. Last Known State: [Location: ${s.location}] [Outfit: ${s.clothing}].
-3. TASK: Analyze the last ${contextDepth} messages. Determine if the Location or Outfit has changed based on recent actions (e.g. traveling, changing clothes).
-   - If changed: Update the state in the header.
-   - If unchanged: Maintain the Last Known State.
-   - Infer details if they are implied but not explicitly stated.
-4. RESPONSE FORMAT: Start every response with this hidden block:
-   \`⦗ Loc: <Location> | Wear: <Outfit> | Tone: <Mood> | Topic: <Subject> | Act: <Action> ⦘\`
-5. Then write the character response.
+\n[SYSTEM INSTRUCTION: STATE TRACKING & WORLD SIMULATION]
+Analyze the last ${contextDepth} messages and the current scenario. You must output a hidden JSON block detailing the current state of the world and character.
+Verify the "Time" and advance it logically based on actions taken (e.g., traveling takes time).
+
+Output Format:
+Start your response with \`⦗\` and end the JSON block with \`⦘\`. The content inside must be valid JSON.
+Example Structure:
+⦗
+{
+  "Time": "4:30 p.m; 06/15/1929 (Saturday)",
+  "Tone": "Perfect",
+  "Topic": "Tense Negotiation",
+  "CharactersPresent": ["{{user}}", "Al Capone"],
+  "Outfit": ["Black pinstripe suit", "White fedora", "Gold watch"],
+  "StateOfDress": "Suit jacket unbuttoned, tie loosened slightly.",
+  "CurrentAction": "Sitting at desk, smoking a cigar",
+  "Location": "The Green Mill Lounge, Uptown, Chicago, Illinois",
+  "Weather": "22°C, 60% humidity, light wind. Overcast with threatening rain.",
+  "Cash": "500 USD in money clip in jacket pocket",
+  "Income": "Bootlegging operations, Weekly, 5000 USD",
+  "Intoxication": "Slightly buzzed",
+  "HungerThirst": "Not hungry, drinking whiskey",
+  "Excretion": "No urge"
+}
+⦘
+
+Field Requirements:
+1. Time: Format as "HH:MM p.m; MM/DD/YYYY (DayName)".
+2. Topic: 1-2 words on primary nature/dynamic.
+3. CharactersPresent: Array of nicknames. Put {{user}} first if present. Only active participants.
+4. Outfit: Detailed list of clothing/accessories/undergarments. No status description here. If naked, state it.
+5. StateOfDress: Condition/arrangement (wrinkled, unbuttoned, damaged). If naked: "No clothing present".
+6. CurrentAction: Posture, interaction (e.g., "Standing at podium").
+7. Location: "Specific Place, Building, City, State".
+8. Weather: Scientific tone (Temp C, wind, clouds). Match time/environment.
+9. Cash: Amount (USD) and location (wallet/pocket). Infer realistic amount if unknown. No "Unknown".
+10. Income: Source, frequency, estimated amount. Single line.
+11. Intoxication: Logical level based on intake.
+12. HungerThirst: Logical level based on time since last meal.
+13. Excretion: Biological urge level (bladder/bowels) based on 24h cycle/intake.
+
+AFTER the JSON block, write the character's response as normal.
 `;
 
-    // Inject at the end of the prompt (depth 0, position 1) to ensure it overrides defaults
+    // Inject at the very end (depth 0, position 1) to ensure it overrides defaults
     context.setExtensionPrompt('RagTracker', instruction, 1, 0, true);
-    console.log(`[${MODULE_NAME}] [TRACKER DEBUG] Prompt Injected via setExtensionPrompt (Date: ${dateStr})`);
+    console.log(`[${MODULE_NAME}] [TRACKER] System Instructions Injected via setExtensionPrompt.`);
 };
 
 const tracker_onReplyProcessed = (data) => {
     if (!extensionSettings.trackerEnabled) return data;
     const rawMsg = data.text;
     
-    // Updated regex to be more robust (catch multiline or weird formatting)
+    // Updated regex to capture JSON block between ⦗ and ⦘
     const regex = /⦗([\s\S]*?)⦘/; 
     const match = rawMsg.match(regex);
     
     if (match) {
-        const content = match[1];
-        tracker_parseStateString(content);
-        tracker_advanceTime(extensionSettings.trackerTimeStep);
-        const s = window.RagTrackerState;
-        
-        // Generate the HTML Box
-        if (extensionSettings.trackerInline) {
-            const htmlBox = `
+        const jsonStr = match[1];
+        try {
+            const parsedData = JSON.parse(jsonStr);
+            window.RagTrackerState.updateFromJSON(parsedData);
+            
+            console.log(`[${MODULE_NAME}] [TRACKER] State Updated via JSON`);
+            
+            // Generate the HTML Grid Header
+            if (extensionSettings.trackerInline) {
+                const s = window.RagTrackerState;
+                const renderArr = (arr) => arr.length ? arr.join(', ') : 'None';
+                
+                // --- GRID LAYOUT (No Icons, Looks like a Header) ---
+                const html = `
 <div class="ft-inline-container">
-    <div class="ft-box">
-        <div class="ft-item ft-time"><span class="ft-label">🕒</span> <span class="ft-val">${s.getFormattedDate()}</span></div>
-        <div class="ft-item ft-loc"><span class="ft-label">📍</span> <span class="ft-val">${s.location}</span></div>
-        <div class="ft-item ft-wear"><span class="ft-label">👕</span> <span class="ft-val">${s.clothing}</span></div>
-        <div class="ft-item ft-tone"><span class="ft-label">💭</span> <span class="ft-val">${s.tone}</span></div>
+    <div class="ft-grid">
+        <div class="ft-cell full-width">
+            <div class="ft-label">Time & Date</div>
+            <div class="ft-val">${s.time}</div>
+        </div>
+        
+        <div class="ft-cell full-width">
+            <div class="ft-label">Location</div>
+            <div class="ft-val">${s.location}</div>
+        </div>
+
+        <div class="ft-cell">
+            <div class="ft-label">Weather</div>
+            <div class="ft-val">${s.weather}</div>
+        </div>
+        <div class="ft-cell">
+            <div class="ft-label">Action</div>
+            <div class="ft-val">${s.action}</div>
+        </div>
+
+        <div class="ft-cell">
+            <div class="ft-label">Topic</div>
+            <div class="ft-val">${s.topic}</div>
+        </div>
+        <div class="ft-cell">
+            <div class="ft-label">Tone</div>
+            <div class="ft-val">${s.tone}</div>
+        </div>
+
+        <div class="ft-cell full-width">
+            <div class="ft-label">Present</div>
+            <div class="ft-val">${renderArr(s.present)}</div>
+        </div>
+
+        <div class="ft-cell full-width">
+            <div class="ft-label">Outfit</div>
+            <div class="ft-val" style="font-size:0.9em;">${renderArr(s.outfit)}</div>
+        </div>
+        
+        <div class="ft-cell full-width">
+            <div class="ft-label">State of Dress</div>
+            <div class="ft-val" style="font-style:italic;">${s.dressState}</div>
+        </div>
+
+        <div class="ft-cell">
+            <div class="ft-label">Cash</div>
+            <div class="ft-val">${s.cash}</div>
+        </div>
+        <div class="ft-cell">
+            <div class="ft-label">Income</div>
+            <div class="ft-val" style="font-size:0.8em;">${s.income}</div>
+        </div>
+
+        <div class="ft-cell">
+            <div class="ft-label">Intoxication</div>
+            <div class="ft-val">${s.intoxication}</div>
+        </div>
+        <div class="ft-cell">
+            <div class="ft-label">Needs</div>
+            <div class="ft-val" style="font-size:0.85em;">H/T: ${s.hunger}<br>Exc: ${s.excretion}</div>
+        </div>
     </div>
 </div>`;
-            // Remove the hidden block and prepend the HTML
-            data.text = htmlBox + "\n" + rawMsg.replace(regex, "").trim();
-        } else {
-            // Just remove the block
+                // Remove the hidden block and prepend the HTML
+                data.text = html + "\n" + rawMsg.replace(regex, "").trim();
+            } else {
+                // Just remove the block
+                data.text = rawMsg.replace(regex, "").trim();
+            }
+        } catch (e) {
+            console.error(`[${MODULE_NAME}] [TRACKER] Failed to parse JSON:`, e);
+            // Fallback: Just remove the block if it failed to parse
             data.text = rawMsg.replace(regex, "").trim();
         }
     }
@@ -1585,18 +1685,10 @@ function createSettingsUI() {
                         <div id="rag_tracker_drawer" class="inline-drawer">
                             <div class="inline-drawer-toggle inline-drawer-header"><b>Fuck Tracker</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down"></div></div>
                             <div class="inline-drawer-content">
-                                <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_enabled" ${extensionSettings.trackerEnabled ? 'checked' : ''} />Enable Zero-Latency Tracking</label>
-                                <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_inline" ${extensionSettings.trackerInline ? 'checked' : ''} />Show Inline Chat Status</label>
-                                
-                                <div class="flex-container"><label>Date (Start)</label><input type="datetime-local" id="ragfordummies_tracker_start_date" class="text_pole" value="${extensionSettings.trackerStartDate}"></div>
-                                <div class="flex-container"><label>Minutes per Turn</label><input type="number" id="ragfordummies_tracker_time_step" class="text_pole" value="${extensionSettings.trackerTimeStep}" min="1" max="1440"></div>
-                                <div class="flex-container"><label>Context Focus (Msgs)</label><input type="number" id="ragfordummies_tracker_context_depth" class="text_pole" value="${extensionSettings.trackerContextDepth}" min="1" max="50">
+                                <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_enabled" ${extensionSettings.trackerEnabled ? 'checked' : ''} />Enable State Tracking</label>
+                                <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_inline" ${extensionSettings.trackerInline ? 'checked' : ''} />Show Tracker Header</label>
+                                <div class="flex-container"><label>Context Depth</label><input type="number" id="ragfordummies_tracker_context_depth" class="text_pole" value="${extensionSettings.trackerContextDepth}" min="1" max="50">
                                 <small>How many recent messages the AI should analyze to infer changes.</small></div>
-                                
-                                <hr><small>Edit Tracker (Manual Overrides):</small>
-                                <div class="flex-container"><label>Location</label><input type="text" id="ft_manual_loc" class="text_pole" placeholder="e.g. Tavern"></div>
-                                <div class="flex-container"><label>Outfit</label><input type="text" id="ft_manual_wear" class="text_pole" placeholder="e.g. Naked"></div>
-                                <div class="flex-container"><label>Tone</label><input type="text" id="ft_manual_tone" class="text_pole" placeholder="e.g. Angry"></div>
                                 
                                 <div style="margin-top:10px; padding:5px; background:rgba(0,0,0,0.2); border-radius:4px; font-family:monospace; font-size:0.8em;"><strong>Current State:</strong><br><span id="ft_debug_time">Loading...</span></div>
                             </div>
@@ -1815,21 +1907,19 @@ async function init() {
         
         // RAG AND TRACKER INJECTION HOOKS
         if (typeof injectContextWithSetExtensionPrompt === 'function') {
-            eventSourceToUse.on('GENERATION_AFTER_COMMANDS', (type) => {
-                injectContextWithSetExtensionPrompt(type); // RAG
-                tracker_injectInstruction();             // TRACKER
-            });
-            eventSourceToUse.on('generate_before_combine_prompts', () => {
-                injectContextWithSetExtensionPrompt('normal'); // RAG
-                tracker_injectInstruction();                 // TRACKER
-            });
+            const injectionHandler = (type) => {
+                injectContextWithSetExtensionPrompt(type || 'normal'); // RAG
+                tracker_injectInstruction();                           // TRACKER
+            };
+            eventSourceToUse.on('GENERATION_AFTER_COMMANDS', injectionHandler);
+            eventSourceToUse.on('generate_before_combine_prompts', () => injectionHandler('normal'));
         }
         
         // --- TRACKER OUTPUT PARSING ---
-        // text_generation_prompt_preparation removed in favor of setExtensionPrompt in tracker_injectInstruction
         eventSourceToUse.on('chat_completion_processed', tracker_onReplyProcessed);
 
         eventsRegistered = true;
+        // usePolling = false; <-- Removed to allow background summary polling
         console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
     } else {
         console.log('[' + MODULE_NAME + '] eventSource not available, using polling fallback');
