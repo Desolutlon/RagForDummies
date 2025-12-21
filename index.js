@@ -1,6 +1,6 @@
 /**
- * RagForDummies - A RAG extension for SillyTavern that actually works
- * Supports group chats with Qdrant vector storage
+ * RagForDummies + FuckTracker Integration
+ * A RAG extension for SillyTavern that actually works + Zero Latency State Tracking
  */
 
 const MODULE_NAME = 'RagForDummies';
@@ -11,7 +11,8 @@ const MODULE_LOG_WHITELIST = [
     'Extension loaded successfully',
     'Container found',
     'Content found',
-    'Initial check'
+    'Initial check',
+    'Tracker'
 ];
 
 // Allow detailed confirmations and hybrid search traces
@@ -21,16 +22,17 @@ const MODULE_LOG_ALLOW_SUBSTR = [
     'Delete:',
     'Swipe:',
     'Edit:',
-    'HYBRID',          // any HYBRID SEARCH header/detail
+    'HYBRID',
     'Run 1', 'Run 2',
     'Final', 'Score',
     'Collection:', 'Parameters:', 'Proper nouns',
     'validated results', 'dense', 'filtered',
     'Result', 'query filter', 'retrieved', 'retrieval', 'combined',
-    'Query:',          // query message selection logging
-    'Excluding',       // participant name exclusion logging
-    'Summary changed', // logging for qvlink updates
-    'Qvlink Sync'      // Explicit tag for summary updates
+    'Query:',
+    'Excluding',
+    'Summary changed',
+    'Qvlink Sync',
+    'State Updated' // Tracker log
 ];
 
 const __origConsoleLog = console.log.bind(console);
@@ -46,7 +48,20 @@ console.log = function(...args) {
     __origConsoleLog(...args);
 };
 
-// Extension settings with defaults
+// =================================================================
+// 1. GLOBAL TRACKER STATE (FuckTracker Engine)
+// =================================================================
+window.RagTrackerState = {
+    day: 1,
+    time: "08:00",
+    location: "Unknown",
+    clothing: "Casual",
+    tone: "Neutral",
+    topic: "Greetings",
+    action: "Standing"
+};
+
+// Extension settings with defaults (Includes Tracker Settings now)
 const defaultSettings = {
     enabled: true,
     qdrantLocalUrl: 'http://localhost:6333',
@@ -58,14 +73,18 @@ const defaultSettings = {
     openaiModel: 'text-embedding-3-small',
     retrievalCount: 5,
     similarityThreshold: 0.7,
-    maxTokenBudget: 1000, // Token Budget Setting
-    queryMessageCount: 3, // How many recent messages to use for context
+    maxTokenBudget: 1000,
+    queryMessageCount: 3,
     autoIndex: true,
     injectContext: true,
     injectionPosition: 'after_main',
     injectAfterMessages: 3,
     excludeLastMessages: 2,
-    userBlacklist: ''
+    userBlacklist: '',
+    // --- TRACKER SETTINGS ---
+    trackerEnabled: true,
+    trackerHud: true,
+    trackerTimeStep: 15
 };
 
 let extensionSettings = { ...defaultSettings };
@@ -76,12 +95,82 @@ let lastMessageCount = 0;
 let lastChatId = null;
 let pollingInterval = null;
 let indexedMessageIds = new Set();
-// Tracks the last known summary for a message index to detect Qvlink updates
 let lastKnownSummaries = new Map(); 
 let usePolling = false;
 let eventsRegistered = false;
 let lastInjectionTime = 0;
 const INJECTION_DEBOUNCE_MS = 1000;
+
+// ===========================
+// TRACKER LOGIC (Time & Parsing)
+// ===========================
+
+function tracker_advanceTime(minutesToAdd) {
+    if (!extensionSettings.trackerEnabled) return;
+
+    let [hours, minutes] = window.RagTrackerState.time.split(':').map(Number);
+    minutes += Number(minutesToAdd);
+
+    while (minutes >= 60) { minutes -= 60; hours += 1; }
+    while (hours >= 24) { 
+        hours -= 24; 
+        window.RagTrackerState.day += 1;
+        if (typeof toastr !== 'undefined') toastr.info(`Day ${window.RagTrackerState.day} has begun.`);
+    }
+
+    window.RagTrackerState.time = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+    tracker_updateHud();
+}
+
+function tracker_updateHud() {
+    if (!extensionSettings.trackerHud) {
+        $('#rag-tracker-hud').hide();
+        return;
+    }
+    
+    // Create HUD if missing
+    if ($('#rag-tracker-hud').length === 0) {
+        const hudHtml = `
+        <div id="rag-tracker-hud" style="display:flex; flex-wrap:wrap; gap:10px; padding:10px; margin-bottom:10px; background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.1); border-radius:5px; font-size:0.85em; color:#e0e0e0; backdrop-filter:blur(2px); width:100%; box-sizing:border-box;">
+            <style>
+                .rt-stat { display:flex; align-items:center; background:rgba(255,255,255,0.05); padding:2px 6px; border-radius:4px; border-left:3px solid #007bff; }
+                .rt-label { font-weight:bold; margin-right:5px; opacity:0.7; font-size:0.75em; text-transform:uppercase; }
+                .rt-val { font-family:monospace; }
+            </style>
+            <div class="rt-stat" style="border-color:#ffcc00"><span class="rt-label">TIME</span><span class="rt-val" id="rt-val-time">--:--</span></div>
+            <div class="rt-stat" style="border-color:#00cc66"><span class="rt-label">LOC</span><span class="rt-val" id="rt-val-loc">---</span></div>
+            <div class="rt-stat" style="border-color:#ff66cc"><span class="rt-label">WEAR</span><span class="rt-val" id="rt-val-wear">---</span></div>
+            <div class="rt-stat" style="border-color:#00ccff"><span class="rt-label">TONE</span><span class="rt-val" id="rt-val-tone">---</span></div>
+            <div class="rt-stat" style="border-color:#cc33ff"><span class="rt-label">TOPIC</span><span class="rt-val" id="rt-val-topic">---</span></div>
+        </div>`;
+        $('#chat_header_wrapper').after(hudHtml);
+    }
+
+    $('#rag-tracker-hud').show();
+    const s = window.RagTrackerState;
+    $('#rt-val-time').text(`Day ${s.day}, ${s.time}`);
+    $('#rt-val-loc').text(s.location);
+    $('#rt-val-wear').text(s.clothing);
+    $('#rt-val-tone').text(s.tone);
+    $('#rt-val-topic').text(s.topic);
+}
+
+function tracker_parseStateString(str) {
+    const parts = str.split('|');
+    parts.forEach(part => {
+        let [key, val] = part.split(':').map(x => x.trim());
+        if (!key || !val) return;
+        key = key.toLowerCase();
+        
+        if (key.includes('loc')) window.RagTrackerState.location = val;
+        if (key.includes('wear')) window.RagTrackerState.clothing = val;
+        if (key.includes('tone')) window.RagTrackerState.tone = val;
+        if (key.includes('topic')) window.RagTrackerState.topic = val;
+        if (key.includes('act')) window.RagTrackerState.action = val;
+    });
+    console.log(`[${MODULE_NAME}] State Updated:`, window.RagTrackerState);
+    tracker_updateHud();
+}
 
 // ===========================
 // Utility and NLP Functions
@@ -738,9 +827,6 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     const normalizedMessage = (message.mes || '').replace(/(\w)\*+(\w)/g, '$1 $2');
 
     // --- AGGRESSIVE NAME STRIPPING FOR PAYLOAD GENERATION ---
-    // We create a "clean" version of the text that has NO names in it.
-    // This text is passed to the keyword extractors.
-    // This ensures that the "proper_nouns" field in the database NEVER contains names.
     const textForKeywords = sanitizeTextForKeywords(normalizedMessage, participantNames);
     
     // --- The Unified Keyword Pipeline ---
@@ -794,19 +880,15 @@ function getQueryMessage(context, idxOverride, generationType) {
 }
 
 /**
- * NEW FUNCTION: Constructs a query string from multiple messages.
- * Respects group chat presence logic (The "Melissa Check").
- * Does NOT strip names (Dense Search needs names).
+ * Constructs a query string from multiple messages.
+ * Respects group chat presence logic.
+ * NEW: Injects Tracker State into Query!
  */
 function constructMultiMessageQuery(context, generationType) {
     const anchorMsg = getQueryMessage(context, null, generationType);
     if (!anchorMsg) return "";
 
     const count = extensionSettings.queryMessageCount || 1;
-    
-    // Quick exit for single message mode
-    if (count <= 1) return anchorMsg.mes;
-
     const chat = context.chat;
     const anchorIdx = chat.lastIndexOf(anchorMsg);
     if (anchorIdx === -1) return anchorMsg.mes;
@@ -815,40 +897,39 @@ function constructMultiMessageQuery(context, generationType) {
     const isGroup = isCurrentChatGroupChat();
     const collectedText = [];
 
+    // 1. Gather Chat Context
     let messagesFound = 0;
     let currentIdx = anchorIdx;
-
     while (messagesFound < count && currentIdx >= 0) {
         const msg = chat[currentIdx];
-        
-        if (msg.is_system) {
-            currentIdx--;
-            continue;
-        }
+        if (msg.is_system) { currentIdx--; continue; }
 
         let isVisible = true;
-
-        // Group Chat "Melissa Check"
         if (isGroup && activeChar) {
             const isSender = (msg.name === activeChar);
             const presentList = (msg.present || msg.characters_present || []).map(n => String(n).toLowerCase());
             const isPresent = presentList.includes(activeChar.toLowerCase());
-
-            if (!isSender && presentList.length > 0 && !isPresent) {
-                isVisible = false;
-                console.log(`[${MODULE_NAME}] Query Build: Skipping msg #${currentIdx} - Not present.`);
-            }
+            if (!isSender && presentList.length > 0 && !isPresent) isVisible = false;
         }
 
         if (isVisible && msg.mes) {
             collectedText.unshift(msg.mes);
             messagesFound++;
         }
-
         currentIdx--;
     }
+    
+    let query = collectedText.join('\n');
 
-    return collectedText.join('\n');
+    // 2. INJECT TRACKER CONTEXT (SYNERGY)
+    if (extensionSettings.trackerEnabled) {
+        const t = window.RagTrackerState;
+        // This makes Qdrant search for relevant Locations and Moods automatically
+        query += `\n[Context: Location is ${t.location}, Mood is ${t.tone}, Time is Day ${t.day} ${t.time}]`;
+        console.log(`[${MODULE_NAME}] Enhanced Query with Tracker Context: ${t.location}, ${t.tone}`);
+    }
+
+    return query;
 }
 
 async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
@@ -980,19 +1061,12 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         const participantNames = getParticipantNames(null);
 
         // --- PATH A: DENSE VECTOR (KEEPS NAMES) ---
-        // We want the vector to understand "Ryan did X", so we keep the names here.
         const queryEmbedding = await generateEmbedding(query);
         
         // --- PATH B: KEYWORD FILTER (STRIPS NAMES) ---
-        // We do NOT want to match simply because the name "Ryan" is in the text.
-        // We explicitly strip the participant names from the text string BEFORE asking for keywords.
-        // This regex method is far more robust than simple word checking.
         const textForKeywords = sanitizeTextForKeywords(query, participantNames);
-        
-        // Now extract terms from the sanitized text
         const queryFilterTerms = extractQueryFilterTerms(textForKeywords, participantNames);
         
-        // Log this to confirm it's working for you in the console
         if (queryFilterTerms.length > 0) {
              console.log('[' + MODULE_NAME + '] Query Keywords (Names Removed):', queryFilterTerms);
         }
@@ -1026,7 +1100,6 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         const tokenBudget = extensionSettings.maxTokenBudget || 1000;
         let budgetHit = false;
 
-        // Results are already sorted by score (Descending)
         for (const result of filteredByPresence) {
             const p = result.payload;
             const score = result.score;
@@ -1034,7 +1107,6 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
             if (p.summary) text += `\n\nSummary: ${p.summary}`;
             text += `\n\nFull Message: ${p.full_message}`;
 
-            // Approximate token count (1 token ~= 4 chars)
             const estimatedTokens = Math.ceil(text.length / 4);
 
             if (currentTotalTokens + estimatedTokens > tokenBudget) {
@@ -1109,6 +1181,10 @@ async function onChatLoaded() {
     lastKnownSummaries.clear();
     const chatId = getCurrentChatId();
     lastChatId = chatId;
+    
+    // Tracker HUD Update on load
+    tracker_updateHud();
+
     console.log('[' + MODULE_NAME + '] Chat loaded. Chat ID:', chatId);
     updateUI('status', 'Chat loaded - checking index...');
     try {
@@ -1117,8 +1193,6 @@ async function onChatLoaded() {
         else if (typeof getContext === 'function') context = getContext();
         if (context && context.chat) {
             lastMessageCount = context.chat.length;
-            // POPULATE SUMMARY TRACKER IMMEDIATELY ON LOAD
-            // This ensures we have a baseline to detect changes against
             context.chat.forEach((msg, idx) => {
                 lastKnownSummaries.set(idx, getSummaryFromMsg(msg));
             });
@@ -1279,7 +1353,6 @@ async function startPolling() {
             }
             
             // 1. Check for NEW messages (Only if NOT using Event Source)
-            // If we have eventSource, that handles new messages. We don't want to double index.
             if (!eventsRegistered) {
                 if (context.chat.length > lastMessageCount) {
                     for (let i = lastMessageCount; i < context.chat.length; i++) {
@@ -1289,32 +1362,23 @@ async function startPolling() {
                     lastMessageCount = context.chat.length;
                 }
             } else {
-                // Keep the count synced even if we rely on events, so the loop below works correctly
                 lastMessageCount = context.chat.length; 
             }
             
             // 2. --- Qvlink Summary Sync ---
-            // This runs ALWAYS, because ST events don't fire for background metadata updates
             for (let i = 0; i < context.chat.length; i++) {
                 const msg = context.chat[i];
                 const currentSum = getSummaryFromMsg(msg);
                 const knownSum = lastKnownSummaries.get(i);
                 
-                // If tracked and changed
                 if (lastKnownSummaries.has(i) && currentSum !== knownSum) {
                     console.log('[' + MODULE_NAME + '] [Qvlink Sync] Summary changed for message ' + i + '. Re-indexing...');
                     updateUI('status', '↻ Syncing summary for msg #' + i);
-                    
-                    lastKnownSummaries.set(i, currentSum); // Update immediately to prevent loops
-                    
-                    // CRITICAL FIX: Delete the old point first, otherwise we get duplicates because IDs are random UUIDs
+                    lastKnownSummaries.set(i, currentSum); 
                     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
                     await deleteMessageByIndex(collectionName, chatId, i);
-                    
-                    // Re-index with new summary
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
                     
-                    // Reset UI after delay
                     setTimeout(() => {
                         const statusEl = document.getElementById('ragfordummies_status');
                         if (statusEl && statusEl.textContent.indexOf('Syncing summary') !== -1) {
@@ -1322,7 +1386,6 @@ async function startPolling() {
                         }
                     }, 2000);
                 } 
-                // If not tracked yet (e.g. newly added by other logic)
                 else if (!lastKnownSummaries.has(i)) {
                     lastKnownSummaries.set(i, currentSum);
                 }
@@ -1383,8 +1446,6 @@ async function injectContextBeforeGeneration(data) {
     else if (typeof getContext === 'function') context = getContext();
     if (!context?.chat?.length) return;
     
-    // NEW QUERY CONSTRUCTION
-    // Note: data is the raw request, but we need the context for history lookup
     const queryText = constructMultiMessageQuery(context, 'normal');
     if (!queryText) return;
 
@@ -1406,6 +1467,47 @@ async function injectContextBeforeGeneration(data) {
     lastInjectionTime = Date.now();
     updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
 }
+
+// ===========================
+// NEW LISTENERS FOR TRACKER
+// ===========================
+
+const tracker_onPromptGeneration = (data) => {
+    if (!extensionSettings.trackerEnabled) return data;
+    
+    // Inject the Tracker Instructions into the PROMPT (not context)
+    const s = window.RagTrackerState;
+    const instruction = `
+\n[SYSTEM INSTRUCTION: STATE TRACKING]
+Current Simulation Time: Day ${s.day}, ${s.time}.
+Location Context: ${s.location}.
+START every response with a hidden state block exactly like this:
+\`⦗ Loc: <Current Location> | Wear: <Outfit Condition> | Tone: <Emotional Tone> | Topic: <Main Subject> | Act: <Physical Action> ⦘\`
+Ensure the response that follows strictly adheres to this state.
+`;
+
+    if (data && data.prompt) {
+        data.prompt += instruction;
+    }
+    return data;
+};
+
+const tracker_onReplyProcessed = (data) => {
+    if (!extensionSettings.trackerEnabled) return data;
+
+    const rawMsg = data.text;
+    const regex = /⦗(.*?)⦘/s;
+    const match = rawMsg.match(regex);
+
+    if (match) {
+        const content = match[1];
+        tracker_parseStateString(content);
+        data.text = rawMsg.replace(regex, "").trim();
+        tracker_advanceTime(extensionSettings.trackerTimeStep);
+    }
+    return data;
+};
+
 
 // ===========================
 // UI Functions
@@ -1433,6 +1535,25 @@ function createSettingsUI() {
             <div class="inline-drawer-content">
                 <div class="ragfordummies-settings">
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
+                    
+                    <!-- NEW TRACKER SECTION -->
+                    <div class="ragfordummies-section">
+                        <div class="inline-drawer">
+                            <div class="inline-drawer-toggle inline-drawer-header"><b>Simulation & State Tracker</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down"></div></div>
+                            <div class="inline-drawer-content">
+                                <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_enabled" ${extensionSettings.trackerEnabled ? 'checked' : ''} />Enable Zero-Latency Tracking</label>
+                                <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_hud" ${extensionSettings.trackerHud ? 'checked' : ''} />Show HUD on Chat</label>
+                                <div class="flex-container">
+                                    <label>Minutes per Turn</label>
+                                    <input type="number" id="ragfordummies_tracker_time_step" class="text_pole" value="${extensionSettings.trackerTimeStep}" min="1" max="1440">
+                                </div>
+                                <hr>
+                                <small>Forces AI to track clothing, location, and time automatically. This info improves RAG search results.</small>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- END TRACKER SECTION -->
+
                     <div class="ragfordummies-section"><h4>Qdrant Configuration</h4><label><span>Local URL:</span><input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" placeholder="http://localhost:6333" /></label></div>
                     <div class="ragfordummies-section"><h4>Embedding Provider</h4><label><span>Provider:</span><select id="ragfordummies_embedding_provider"><option value="kobold" ${extensionSettings.embeddingProvider === 'kobold' ? 'selected' : ''}>KoboldCpp</option><option value="ollama" ${extensionSettings.embeddingProvider === 'ollama' ? 'selected' : ''}>Ollama</option><option value="openai" ${extensionSettings.embeddingProvider === 'openai' ? 'selected' : ''}>OpenAI</option></select></label><label id="ragfordummies_kobold_settings" style="${extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none'}"><span>KoboldCpp URL:</span><input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" placeholder="http://localhost:11434" /></label><div id="ragfordummies_ollama_settings" style="${extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none'}"><label><span>Ollama URL:</span><input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" placeholder="http://localhost:11434" /></label><label><span>Ollama Model:</span><input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" placeholder="nomic-embed-text" /></label></div><div id="ragfordummies_openai_settings" style="${extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none'}"><label><span>OpenAI API Key:</span><input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" placeholder="sk-..." /></label><label><span>OpenAI Model:</span><input type="text" id="ragfordummies_openai_model" value="${extensionSettings.openaiModel}" placeholder="text-embedding-3-small" /></label></div></div>
                     <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Query Context Messages:</span><input type="number" id="ragfordummies_query_message_count" value="${extensionSettings.queryMessageCount}" min="1" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">How many recent messages to combine for the search query. Higher = better topic understanding.</small></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /><small style="opacity:0.7; display:block; margin-top:5px;">Budget for injected context. Lower budget = less context injected (least relevant information will be thrown away)</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
@@ -1449,7 +1570,9 @@ function attachEventListeners() {
         'enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
         'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index', 
         'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
-        'max_token_budget'
+        'max_token_budget',
+        // Tracker Settings
+        'tracker_enabled', 'tracker_hud', 'tracker_time_step'
     ];
     settingIds.forEach(id => {
         const element = document.getElementById('ragfordummies_' + id);
@@ -1463,6 +1586,10 @@ function attachEventListeners() {
                     if (element.checked && !pollingInterval) startPolling();
                     else if (!element.checked && pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
                 }
+                
+                // Tracker Specific: UI Update
+                if (id === 'tracker_hud') tracker_updateHud();
+
                 saveSettings();
             });
         }
@@ -1608,6 +1735,12 @@ async function init() {
                 $(this).find('.inline-drawer-icon').toggleClass('down up');
                 $('#ragfordummies_container .inline-drawer-content').slideToggle(200);
             });
+            // Nested Toggle for Tracker
+            $('#ragfordummies_container .inline-drawer .inline-drawer-toggle').on('click', function(e){
+                e.stopPropagation();
+                $(this).find('.inline-drawer-icon').toggleClass('down up');
+                $(this).next('.inline-drawer-content').slideToggle(200);
+            });
         }
     }, 200);
     
@@ -1629,8 +1762,14 @@ async function init() {
             eventSourceToUse.on('GENERATION_AFTER_COMMANDS', (type) => injectContextWithSetExtensionPrompt(type));
             eventSourceToUse.on('generate_before_combine_prompts', () => injectContextWithSetExtensionPrompt('normal'));
         }
+
+        // --- NEW TRACKER LISTENERS ---
+        // 1. Prepare Prompt (Inject Instructions)
+        eventSourceToUse.on(SillyTavern.event_types.TEXT_GENERATION_PROMPT_PREPARATION, tracker_onPromptGeneration);
+        // 2. Process Output (Read/Hide State)
+        eventSourceToUse.on(SillyTavern.event_types.CHAT_COMPLETION_PROCESSED, tracker_onReplyProcessed);
+
         eventsRegistered = true;
-        // usePolling = false; <-- Removed to allow background summary polling
         console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
     } else {
         console.log('[' + MODULE_NAME + '] eventSource not available, using polling fallback');
