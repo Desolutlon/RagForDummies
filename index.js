@@ -15,7 +15,8 @@ const MODULE_LOG_WHITELIST = [
     'Tracker',
     'TRACKER',
     'TRACKER DEBUG',
-    'JSON Parse'
+    'JSON Parse',
+    'FUCKTRACKER'
 ];
 
 // Allow detailed confirmations and hybrid search traces
@@ -146,25 +147,25 @@ function injectTrackerCSS() {
     if (document.getElementById(styleId)) return;
 
     const css = `
-        /* The Header Container - Pushed to top of bubble using negative margins */
+        /* The Header Container */
         .ft-inline-container {
             display: block;
-            margin: -10px -10px 15px -10px !important;
-            width: calc(100% + 20px);
-            background-color: rgba(20, 20, 20, 0.4);
-            border-bottom: 2px solid var(--SmartThemeBorderColor);
-            border-radius: 10px 10px 0 0;
+            width: 100%;
+            margin-bottom: 12px; /* Space between box and character text */
+            background-color: rgba(20, 20, 20, 0.5);
+            border: 1px solid var(--SmartThemeBorderColor);
+            border-radius: 8px;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 0.75em;
             overflow: hidden;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
         }
         
         .ft-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
             gap: 1px;
-            background-color: rgba(255,255,255,0.1); /* Lines between cells */
+            background-color: rgba(255,255,255,0.05); /* Subtle grid lines */
         }
 
         .ft-cell {
@@ -183,7 +184,7 @@ function injectTrackerCSS() {
             text-transform: uppercase;
             font-weight: 700;
             font-size: 0.85em;
-            opacity: 0.6;
+            opacity: 0.5;
             margin-bottom: 2px;
             letter-spacing: 0.5px;
         }
@@ -1500,14 +1501,17 @@ const tracker_injectInstruction = () => {
     const s = window.RagTrackerState;
     const contextDepth = extensionSettings.trackerContextDepth || 10;
     
-    // --- THE MEGA PROMPT (Updated to your specifics) ---
+    // --- THE MEGA PROMPT (Updated to your specifics and fixed logic) ---
     const instruction = `
-\n[SYSTEM INSTRUCTION: STATE TRACKING & WORLD SIMULATION]
+\n[SYSTEM INSTRUCTION: FUCKTRACKER]
 Analyze the last ${contextDepth} messages and the current scenario. You must output a hidden JSON block detailing the current state of the world and character.
-Verify the "Time" and advance it logically based on actions taken (e.g., traveling takes time).
 
 Output Format:
-Start your response with \`⦗\` and end the JSON block with \`⦘\`. The content inside must be valid JSON.
+1. Start your response with \`⦗\`.
+2. Output a valid JSON block containing the fields below.
+3. Close the JSON block with \`⦘\`.
+4. CRITICAL: You must write the character's response/dialogue AFTER the JSON block. Do not output only the JSON.
+
 Example Structure:
 ⦗
 {
@@ -1527,6 +1531,7 @@ Example Structure:
   "Excretion": "No urge"
 }
 ⦘
+*Al leans back in his chair, ash falling from his cigar.* "So, you think you can just walk in here?"
 
 Field Requirements:
 1. Time: Format as "HH:MM p.m; MM/DD/YYYY (DayName)".
@@ -1542,8 +1547,6 @@ Field Requirements:
 11. Intoxication: Logical level based on intake.
 12. HungerThirst: Logical level based on time since last meal.
 13. Excretion: Biological urge level (bladder/bowels) based on 24h cycle/intake.
-
-AFTER the JSON block, write the character's response as normal.
 `;
 
     // Inject at the very end (depth 0, position 1) to ensure it overrides defaults
@@ -1572,7 +1575,7 @@ const tracker_onReplyProcessed = (data) => {
                 const s = window.RagTrackerState;
                 const renderArr = (arr) => arr.length ? arr.join(', ') : 'None';
                 
-                // --- GRID LAYOUT (No Icons, Looks like a Header) ---
+                // --- GRID LAYOUT (Floats inside top of message) ---
                 const html = `
 <div class="ft-inline-container">
     <div class="ft-grid">
@@ -1638,10 +1641,20 @@ const tracker_onReplyProcessed = (data) => {
         </div>
     </div>
 </div>`;
-                // Remove the hidden block and prepend the HTML
-                data.text = html + "\n" + rawMsg.replace(regex, "").trim();
+                
+                // Remove the JSON block from the text
+                let cleanText = rawMsg.replace(regex, "").trim();
+                
+                // If the AI didn't write anything after the block, we just show the block
+                // But ideally the prompt update fixes this.
+                if (cleanText.length === 0) {
+                     cleanText = "(AI failed to generate dialogue. Please regenerate.)";
+                }
+
+                data.text = html + "\n" + cleanText;
+
             } else {
-                // Just remove the block
+                // Just remove the block if inline is disabled
                 data.text = rawMsg.replace(regex, "").trim();
             }
         } catch (e) {
