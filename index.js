@@ -125,34 +125,36 @@ function injectTrackerCSS() {
     const css = `
         /* The Inline Box (Above Message) */
         .ft-inline-container {
-            font-size: 0.8em;
+            font-size: 0.85em;
             font-family: monospace;
             margin-bottom: 8px;
-            opacity: 0.95;
-            display: inline-block;
-            max-width: 100%;
+            opacity: 1;
+            display: block; /* Changed to block to force new line */
+            width: 100%;
         }
         
         .ft-box {
-            background-color: rgba(30, 30, 30, 0.4);
+            background-color: var(--SmartThemeChatTintColor, rgba(30, 30, 30, 0.6));
             border: 1px solid var(--SmartThemeBorderColor);
             border-radius: 6px;
             display: flex;
             flex-wrap: wrap;
             overflow: hidden;
             box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            padding: 2px 0;
         }
 
         .ft-item {
-            padding: 4px 10px;
+            padding: 4px 12px;
             display: flex;
             align-items: center;
             gap: 6px;
-            border-right: 1px solid rgba(255,255,255,0.1);
+            border-right: 1px solid rgba(128,128,128,0.2);
+            flex-grow: 1;
         }
         
         .ft-item:last-child { border-right: none; }
-        .ft-label { opacity: 0.7; font-weight: bold; font-size: 0.9em; }
+        .ft-label { opacity: 0.8; font-weight: bold; font-size: 0.9em; }
         .ft-val { font-weight: 600; color: var(--SmartThemeBodyColor); }
         
         /* Specific Colors */
@@ -1482,8 +1484,17 @@ async function injectContextWithSetExtensionPrompt(generationType) {
 // LISTENERS (Tracker + RAG)
 // ===========================
 
-const tracker_onPromptGeneration = (data) => {
-    if (!extensionSettings.trackerEnabled) return data;
+// --- NEW INJECTION LOGIC FOR TRACKER ---
+// Using setExtensionPrompt ensures it works on Chat Completion APIs (Ollama/OpenAI) too
+const tracker_injectInstruction = () => {
+    if (!extensionSettings.trackerEnabled) return;
+    
+    let context = null;
+    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
+    else if (typeof getContext === 'function') context = getContext();
+    
+    if (!context || !context.setExtensionPrompt) return;
+
     const s = window.RagTrackerState;
     const dateStr = s.getFormattedDate(); 
     const contextDepth = extensionSettings.trackerContextDepth || 10;
@@ -1502,18 +1513,19 @@ const tracker_onPromptGeneration = (data) => {
 5. Then write the character response.
 `;
 
-    if (data && data.prompt) {
-        data.prompt += instruction;
-        console.log(`[${MODULE_NAME}] [TRACKER DEBUG] Prompt Injected with Date: ${dateStr}`);
-    }
-    return data;
+    // Inject at the end of the prompt (depth 0, position 1) to ensure it overrides defaults
+    context.setExtensionPrompt('RagTracker', instruction, 1, 0, true);
+    console.log(`[${MODULE_NAME}] [TRACKER DEBUG] Prompt Injected via setExtensionPrompt (Date: ${dateStr})`);
 };
 
 const tracker_onReplyProcessed = (data) => {
     if (!extensionSettings.trackerEnabled) return data;
     const rawMsg = data.text;
-    const regex = /⦗(.*?)⦘/s;
+    
+    // Updated regex to be more robust (catch multiline or weird formatting)
+    const regex = /⦗([\s\S]*?)⦘/; 
     const match = rawMsg.match(regex);
+    
     if (match) {
         const content = match[1];
         tracker_parseStateString(content);
@@ -1530,10 +1542,11 @@ const tracker_onReplyProcessed = (data) => {
         <div class="ft-item ft-wear"><span class="ft-label">👕</span> <span class="ft-val">${s.clothing}</span></div>
         <div class="ft-item ft-tone"><span class="ft-label">💭</span> <span class="ft-val">${s.tone}</span></div>
     </div>
-</div>
-`;
+</div>`;
+            // Remove the hidden block and prepend the HTML
             data.text = htmlBox + "\n" + rawMsg.replace(regex, "").trim();
         } else {
+            // Just remove the block
             data.text = rawMsg.replace(regex, "").trim();
         }
     }
@@ -1799,17 +1812,24 @@ async function init() {
         eventSourceToUse.on('message_swiped', onMessageSwiped);
         eventSourceToUse.on('message_deleted', onMessageDeleted);
         eventSourceToUse.on('message_edited', onMessageEdited);
+        
+        // RAG AND TRACKER INJECTION HOOKS
         if (typeof injectContextWithSetExtensionPrompt === 'function') {
-            eventSourceToUse.on('GENERATION_AFTER_COMMANDS', (type) => injectContextWithSetExtensionPrompt(type));
-            eventSourceToUse.on('generate_before_combine_prompts', () => injectContextWithSetExtensionPrompt('normal'));
+            eventSourceToUse.on('GENERATION_AFTER_COMMANDS', (type) => {
+                injectContextWithSetExtensionPrompt(type); // RAG
+                tracker_injectInstruction();             // TRACKER
+            });
+            eventSourceToUse.on('generate_before_combine_prompts', () => {
+                injectContextWithSetExtensionPrompt('normal'); // RAG
+                tracker_injectInstruction();                 // TRACKER
+            });
         }
         
-        // --- TRACKER LISTENERS (Hardcoded Strings to avoid undefined errors) ---
-        eventSourceToUse.on('text_generation_prompt_preparation', tracker_onPromptGeneration);
+        // --- TRACKER OUTPUT PARSING ---
+        // text_generation_prompt_preparation removed in favor of setExtensionPrompt in tracker_injectInstruction
         eventSourceToUse.on('chat_completion_processed', tracker_onReplyProcessed);
 
         eventsRegistered = true;
-        // usePolling = false; <-- Removed to allow background summary polling
         console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
     } else {
         console.log('[' + MODULE_NAME + '] eventSource not available, using polling fallback');
