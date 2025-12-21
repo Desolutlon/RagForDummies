@@ -1,5 +1,5 @@
 /**
- * RagForDummies + FuckTracker Integration
+ * RagForDummies + FuckTracker Integration (Final Version)
  * A RAG extension for SillyTavern that actually works + Zero Latency State Tracking
  */
 
@@ -32,7 +32,7 @@ const MODULE_LOG_ALLOW_SUBSTR = [
     'Excluding',
     'Summary changed',
     'Qvlink Sync',
-    'State Updated' // Tracker log
+    'TRACKER DEBUG' // Whitelist our new debug logs
 ];
 
 const __origConsoleLog = console.log.bind(console);
@@ -84,6 +84,7 @@ const defaultSettings = {
     // --- TRACKER SETTINGS ---
     trackerEnabled: true,
     trackerHud: true,
+    trackerInline: true, // Show the box in chat
     trackerTimeStep: 15
 };
 
@@ -100,6 +101,81 @@ let usePolling = false;
 let eventsRegistered = false;
 let lastInjectionTime = 0;
 const INJECTION_DEBOUNCE_MS = 1000;
+
+// ===========================
+// TRACKER CSS INJECTOR
+// ===========================
+function injectTrackerCSS() {
+    const styleId = 'rag-tracker-styles';
+    if (document.getElementById(styleId)) return;
+
+    const css = `
+        /* The box above the message */
+        .tracker-inline-box {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--SmartThemeBorderColor);
+            border-radius: 6px;
+            padding: 5px 10px;
+            margin-bottom: 8px;
+            font-size: 0.8em;
+            font-family: monospace;
+            color: var(--SmartThemeBodyColor);
+            opacity: 0.9;
+            width: fit-content;
+            max-width: 100%;
+        }
+        .tracker-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .tracker-icon { opacity: 0.7; }
+        .tracker-value { font-weight: 600; }
+
+        /* HUD Styles (Top of screen) */
+        #rag-tracker-hud {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 8px 12px;
+            margin-bottom: 10px;
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 6px;
+            font-size: 0.85em;
+            color: #e0e0e0;
+            backdrop-filter: blur(5px);
+            width: 100%;
+            box-sizing: border-box;
+            position: relative;
+            z-index: 2000;
+        }
+        .rt-stat { 
+            display: flex; 
+            align-items: center; 
+            background: rgba(255, 255, 255, 0.08); 
+            padding: 3px 8px; 
+            border-radius: 4px; 
+            border-left: 3px solid #007bff; 
+        }
+        .rt-label { font-weight: bold; margin-right: 6px; opacity: 0.7; font-size: 0.75em; text-transform: uppercase; }
+        .rt-val { font-family: monospace; }
+        
+        /* Color coding */
+        .t-time, .rt-stat[style*="ffcc00"] { color: #ffcc00; }
+        .t-loc, .rt-stat[style*="00cc66"] { color: #66ff99; }
+        .t-wear, .rt-stat[style*="ff66cc"] { color: #ff99cc; }
+        .t-tone, .rt-stat[style*="00ccff"] { color: #66ccff; }
+    `;
+
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = css;
+    document.head.appendChild(style);
+}
 
 // ===========================
 // TRACKER LOGIC (Time & Parsing)
@@ -131,19 +207,19 @@ function tracker_updateHud() {
     // Create HUD if missing
     if ($('#rag-tracker-hud').length === 0) {
         const hudHtml = `
-        <div id="rag-tracker-hud" style="display:flex; flex-wrap:wrap; gap:10px; padding:10px; margin-bottom:10px; background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.1); border-radius:5px; font-size:0.85em; color:#e0e0e0; backdrop-filter:blur(2px); width:100%; box-sizing:border-box;">
-            <style>
-                .rt-stat { display:flex; align-items:center; background:rgba(255,255,255,0.05); padding:2px 6px; border-radius:4px; border-left:3px solid #007bff; }
-                .rt-label { font-weight:bold; margin-right:5px; opacity:0.7; font-size:0.75em; text-transform:uppercase; }
-                .rt-val { font-family:monospace; }
-            </style>
+        <div id="rag-tracker-hud">
             <div class="rt-stat" style="border-color:#ffcc00"><span class="rt-label">TIME</span><span class="rt-val" id="rt-val-time">--:--</span></div>
             <div class="rt-stat" style="border-color:#00cc66"><span class="rt-label">LOC</span><span class="rt-val" id="rt-val-loc">---</span></div>
             <div class="rt-stat" style="border-color:#ff66cc"><span class="rt-label">WEAR</span><span class="rt-val" id="rt-val-wear">---</span></div>
             <div class="rt-stat" style="border-color:#00ccff"><span class="rt-label">TONE</span><span class="rt-val" id="rt-val-tone">---</span></div>
             <div class="rt-stat" style="border-color:#cc33ff"><span class="rt-label">TOPIC</span><span class="rt-val" id="rt-val-topic">---</span></div>
         </div>`;
-        $('#chat_header_wrapper').after(hudHtml);
+        
+        if ($('#chat_header_wrapper').length) {
+            $('#chat_header_wrapper').after(hudHtml);
+        } else {
+            $('#top-bar').after(hudHtml);
+        }
     }
 
     $('#rag-tracker-hud').show();
@@ -156,6 +232,8 @@ function tracker_updateHud() {
 }
 
 function tracker_parseStateString(str) {
+    console.log(`[${MODULE_NAME}] [TRACKER DEBUG] Raw AI String: "${str}"`);
+    
     const parts = str.split('|');
     parts.forEach(part => {
         let [key, val] = part.split(':').map(x => x.trim());
@@ -168,15 +246,20 @@ function tracker_parseStateString(str) {
         if (key.includes('topic')) window.RagTrackerState.topic = val;
         if (key.includes('act')) window.RagTrackerState.action = val;
     });
-    console.log(`[${MODULE_NAME}] State Updated:`, window.RagTrackerState);
+
+    // Update the visual HUD
     tracker_updateHud();
+    
+    // Update debug box in settings
+    const debugText = `Time: ${window.RagTrackerState.time} | Loc: ${window.RagTrackerState.location} | Wear: ${window.RagTrackerState.clothing}`;
+    $('#rag_tracker_debug_display').text(debugText);
 }
 
 // ===========================
 // Utility and NLP Functions
 // ===========================
+// (No Changes to Blacklists or Keywords - Conserved from original)
 
-// --- The One, Master Blacklist to Rule Them All ---
 const keywordBlacklist = new Set([
     'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs',
     'this', 'that', 'these', 'those', 'what', 'which', 'who', 'whom', 'whose', 'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'why', 'how',
@@ -233,7 +316,6 @@ const keywordBlacklist = new Set([
     'leg', 'legs', 'babe', 'baby', 'darling', 'honey', 'sweetheart', 'dear', 'love', 'oof', 'mmph', 'mmmph'
 ]);
 
-// Helper function to get user-defined blacklist as a Set
 function getUserBlacklistSet() {
     if (!extensionSettings.userBlacklist) return new Set();
     return new Set(
@@ -245,17 +327,14 @@ function getUserBlacklistSet() {
     );
 }
 
-// HELPER: Aggressively strips names (and possessives) from text
 function sanitizeTextForKeywords(text, namesSet) {
     let cleanText = text;
     const sortedNames = Array.from(namesSet).sort((a, b) => b.length - a.length);
     if (sortedNames.length > 0) {
-        // Create regex to match names (whole word, case insensitive)
         const pattern = '\\b(' + sortedNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b';
         const nameRegex = new RegExp(pattern, 'gi');
         cleanText = cleanText.replace(nameRegex, ' '); 
     }
-    // Collapse double spaces created by removal
     return cleanText.replace(/\s+/g, ' ').trim();
 }
 
@@ -263,97 +342,61 @@ function extractKeywords(text, excludeNames = new Set()) {
     if (typeof window.nlp === 'undefined' || !text) {
         return [];
     }
-
-    // --- STEP 1: NORMALIZE & PRE-CLEAN NLP ---
-    // Convert curly quotes to straight quotes so Compromise recognizes contractions
     text = text.replace(/[\u2018\u2019`]/g, "'");
-
-    // Run NLP on the raw text *before* stripping special chars.
     let doc = window.nlp(text);
     doc.match('#Contraction').remove();
     doc.match('#Expression').remove();
     text = doc.text();
-
-    // --- STEP 2: STRIP SPECIAL CHARS ---
-    // Fixes "dream-me" -> "dream me", "Ngh—*Tre*!" -> "Ngh Tre "
-    // Replaces hyphens, em-dashes, en-dashes, underscores, and asterisks with space.
     text = text.replace(/[-–—_*]+/g, ' ');
-
     const wordsInText = text.split(/\s+/).length;
-
-    if (wordsInText < 100) {
-        return [];
-    }
+    if (wordsInText < 100) return [];
     
     const baseKeywords = 5;
     const scalingFactor = 3;
     const additionalKeywords = Math.floor((wordsInText - 100) / 100) * scalingFactor;
     const limit = baseKeywords + additionalKeywords;
-
     const finalKeywords = new Set();
     
-    // --- STEP 3: POST-CLEAN NLP ---
-    // Re-run NLP on the now-cleaned text to build the proper Topics/Keywords list.
-    // We run the removal filters again just in case the special char stripping exposed new edge cases.
     doc = window.nlp(text);
     doc.match('#Expression').remove();
     doc.match('#Contraction').remove();
-
     const processTerm = (term) => {
         const cleaned = term.toLowerCase().replace(/[^a-z]/g, "");
-
-        // Run the full validation gauntlet
         if (
             cleaned && cleaned.length > 2 &&
             !excludeNames.has(cleaned) &&
             !keywordBlacklist.has(cleaned) &&
-            !window.nlp(cleaned).has('#Verb') &&     // Strict verb filtering
-            !window.nlp(cleaned).has('#Pronoun') &&  // Strict pronoun filtering
-            window.nlp(cleaned).has('#Noun')         // Must be a noun
+            !window.nlp(cleaned).has('#Verb') &&     
+            !window.nlp(cleaned).has('#Pronoun') &&  
+            window.nlp(cleaned).has('#Noun')         
         ) {
             finalKeywords.add(cleaned);
         }
     };
-
-    // Get topics and quotations as potential keyword sources
     const topics = doc.topics().out('array');
     const quotes = doc.quotations().out('array');
     const potentialSources = [...topics, ...quotes];
-
     for (const source of potentialSources) {
-        // Split by anything that isn't a letter or number.
-        // This ensures that if any punctuation remains, it splits the word rather than fusing it.
         const words = source.split(/[^a-zA-Z0-9]+/);
-        for (const word of words) {
-            processTerm(word);
-        }
+        for (const word of words) processTerm(word);
     }
-
     return Array.from(finalKeywords).slice(0, limit);
 }
 
 function extractProperNouns(text, excludeNames) {
     if (excludeNames === undefined) excludeNames = new Set();
     if (!text || typeof text !== 'string') return [];
-    
     const properNouns = new Set();
     const sentences = text.split(/[.!?*]+|["'"]\s*/);
-    
     for (let i = 0; i < sentences.length; i++) {
         let sentence = sentences[i].trim();
         if (!sentence) continue;
-        
-        // Clean separators in sentence before splitting
         sentence = sentence.replace(/[-–—_*]+/g, ' ');
-
         const words = sentence.split(/\s+/);
-        
         for (let j = 0; j < words.length; j++) {
             const word = words[j];
-            
             if (j > 0 && /^[A-Z]/.test(word)) {
                 const cleaned = word.toLowerCase().replace(/[^a-z]/g, "");
-
                 if (
                     cleaned && cleaned.length > 2 &&
                     !excludeNames.has(cleaned) &&
@@ -364,7 +407,6 @@ function extractProperNouns(text, excludeNames) {
             }
         }
     }
-    
     return Array.from(properNouns);
 }
 
@@ -379,71 +421,41 @@ function generateUUID() {
 function getParticipantNames(contextOrChat) {
     const names = new Set();
     let context = contextOrChat;
-    
-    // Try to get global context if not provided
     if (!context) {
-        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-            context = SillyTavern.getContext();
-        } else if (typeof getContext === 'function') {
-            context = getContext();
-        }
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
+        else if (typeof getContext === 'function') context = getContext();
     } else if (Array.isArray(contextOrChat)) {
-        // If passed an array (chat history), try to grab global context for metadata anyway
-        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-            context = SillyTavern.getContext();
-        }
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
     }
-
     if (context) {
-        // 1. Primary Names (Context)
         if (context.name1) names.add(context.name1.toLowerCase());
         if (context.name2) names.add(context.name2.toLowerCase());
-        
-        // 2. User Name (explicitly checked from ST globals if available)
         if (typeof SillyTavern !== 'undefined' && SillyTavern.user_name) names.add(SillyTavern.user_name.toLowerCase());
-        
-        // 3. Current Character Nicknames/Data
         if (context.characterId && typeof characters !== 'undefined' && characters[context.characterId]) {
             const charData = characters[context.characterId].data;
-            if (charData && charData.nickname) {
-                names.add(charData.nickname.toLowerCase());
-            }
+            if (charData && charData.nickname) names.add(charData.nickname.toLowerCase());
         }
-
-        // 4. Group Members
         if (context.groups && context.groupId) {
             const group = context.groups.find(g => g.id === context.groupId);
             if (group && group.members) {
                 group.members.forEach(member => {
-                    if (member && member.name) {
-                        names.add(member.name.toLowerCase());
-                    }
+                    if (member && member.name) names.add(member.name.toLowerCase());
                 });
             }
         }
-        
-        // 5. Chat History Scan (Backup for name changes)
         const chatLog = Array.isArray(contextOrChat) ? contextOrChat : (context.chat || []);
         chatLog.forEach(msg => {
-            if (msg.name && typeof msg.name === 'string') {
-                names.add(msg.name.toLowerCase());
-            }
+            if (msg.name && typeof msg.name === 'string') names.add(msg.name.toLowerCase());
         });
     }
-    
-    // Expand names (split First/Last)
-    // We use a temporary array to avoid infinite loop while adding to Set
     const nameParts = [];
     names.forEach(n => {
         const parts = n.split(/\s+/);
         if (parts.length > 1) {
-            parts.forEach(p => { 
-                if (p.length >= 2) nameParts.push(p); 
-            });
+            parts.forEach(p => { if (p.length >= 2) nameParts.push(p); });
         }
     });
     nameParts.forEach(p => names.add(p));
-    
     return names;
 }
 
@@ -468,9 +480,7 @@ function extractQueryFilterTerms(text, excludeNames) {
 // ===========================
 
 function convertChatToJSONL(context) {
-    if (!context || !Array.isArray(context.chat)) {
-        throw new Error('Invalid context: chat array missing');
-    }
+    if (!context || !Array.isArray(context.chat)) throw new Error('Invalid context: chat array missing');
     const lines = [];
     const chatId = (context.chatMetadata && context.chatMetadata.chat_id_hash) || context.chat_id || Date.now().toString();
     const metadata = { chat_metadata: { chat_id_hash: chatId, ...(context.chatMetadata || {}) } };
@@ -526,12 +536,10 @@ async function createCollection(collectionName, vectorSize = 1536) {
     try {
         const collections = await qdrantRequest('/collections');
         if (collections.result.collections.some(c => c.name === collectionName)) {
-            console.log('[' + MODULE_NAME + '] Collection ' + collectionName + ' already exists');
             await createPayloadIndex(collectionName);
             return true;
         }
         await qdrantRequest('/collections/' + collectionName, 'PUT', { vectors: { size: vectorSize, distance: 'Cosine' } });
-        console.log('[' + MODULE_NAME + '] Created collection: ' + collectionName);
         await createPayloadIndex(collectionName);
         return true;
     } catch (error) {
@@ -543,26 +551,16 @@ async function createCollection(collectionName, vectorSize = 1536) {
 async function createPayloadIndex(collectionName) {
     try {
         await qdrantRequest('/collections/' + collectionName + '/index', 'PUT', { field_name: 'proper_nouns', field_schema: 'keyword' });
-        console.log('[' + MODULE_NAME + '] Created payload index for proper_nouns on ' + collectionName);
         return true;
     } catch (error) {
-        if (error.message && error.message.indexOf('already exists') !== -1) {
-            console.log('[' + MODULE_NAME + '] Payload index already exists for ' + collectionName);
-            return true;
-        }
-        console.warn('[' + MODULE_NAME + '] Could not create payload index (non-fatal):', error.message);
+        if (error.message && error.message.indexOf('already exists') !== -1) return true;
         return false;
     }
 }
 
 async function upsertVectors(collectionName, points) {
-    try {
-        await qdrantRequest('/collections/' + collectionName + '/points', 'PUT', { points: points });
-        return true;
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Failed to upsert vectors:', error);
-        throw error;
-    }
+    await qdrantRequest('/collections/' + collectionName + '/points', 'PUT', { points: points });
+    return true;
 }
 
 async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
@@ -570,7 +568,6 @@ async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
         await qdrantRequest('/collections/' + collectionName + '/points/delete', 'POST', {
             filter: { must: [{ key: 'chat_id_hash', match: { value: chatIdHash } }, { key: 'message_index', match: { value: messageIndex } }] }, wait: true
         });
-        console.log('[' + MODULE_NAME + '] Deleted existing point for message_index=' + messageIndex);
     } catch (err) {
         console.warn('[' + MODULE_NAME + '] Delete (by message_index) failed:', err.message);
     }
@@ -589,17 +586,12 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
 
     try {
         console.log('[' + MODULE_NAME + '] ===== HYBRID SEARCH =====');
-        console.log('[' + MODULE_NAME + '] Collection: ' + collectionName);
-        console.log('[' + MODULE_NAME + '] Ignoring messages with index >= ' + maxIndex);
         console.log('[' + MODULE_NAME + '] Proper nouns: ' + (properNouns.length > 0 ? properNouns.join(', ') : '(none)'));
-
         const rangeFilter = { key: 'message_index', range: { lt: maxIndex } };
         const denseFilter = { must: [ rangeFilter ] };
-
         const densePromise = qdrantRequest('/collections/' + collectionName + '/points/search', 'POST', {
             vector: vector, limit: denseFetch, score_threshold: scoreThreshold, with_payload: true, filter: denseFilter
         });
-
         let filteredPromise = Promise.resolve({ result: [] });
         if (properNouns.length > 0 && filteredTarget > 0) {
             const keywordFilter = { must: [ rangeFilter, { key: 'proper_nouns', match: { any: properNouns } } ] };
@@ -607,25 +599,13 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
                 vector: vector, limit: filteredFetch, score_threshold: scoreThreshold, with_payload: true, filter: keywordFilter
             });
         }
-
         const [denseResp, filteredResp] = await Promise.all([densePromise, filteredPromise]);
-
         const denseResults = (denseResp && denseResp.result) ? denseResp.result : [];
         const rawFiltered = (filteredResp && filteredResp.result) ? filteredResp.result : [];
         let filteredResults = [];
         if (rawFiltered.length > 0) {
             filteredResults = rawFiltered.filter(r => (r.payload && r.payload.proper_nouns || []).some(noun => properNouns.indexOf(noun) !== -1));
-            console.log('[' + MODULE_NAME + '] --- Filtered Matches Detail ---');
-            filteredResults.forEach(r => {
-                const resultNouns = r.payload.proper_nouns || [];
-                const matchedTerms = resultNouns.filter(n => properNouns.indexOf(n) !== -1);
-                const idx = r.payload.message_index;
-                const msgSnippet = (r.payload.full_message || '').substring(0, 50).replace(/\n/g, ' ');
-                console.log(`[${MODULE_NAME}] Match (Idx: ${idx}, Score: ${r.score.toFixed(3)}) | Terms: [${matchedTerms.join(', ')}] | "${msgSnippet}..."`);
-            });
-            console.log('[' + MODULE_NAME + '] -----------------------------');
         }
-
         const seenIds = new Set();
         const finalResults = [];
         for (const r of filteredResults) {
@@ -651,11 +631,7 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
                 seenIds.add(r.id);
             }
         }
-
         finalResults.sort((a, b) => b.score - a.score);
-        console.log('[' + MODULE_NAME + '] Final results: ' + finalResults.length + 
-            ' (filtered: ' + finalResults.filter(r => r._source === 'filtered').length + 
-            ', dense: ' + finalResults.filter(r => r._source === 'dense').length + ')');
         return finalResults;
     } catch (error) {
         console.error('[' + MODULE_NAME + '] Hybrid search failed:', error);
@@ -663,43 +639,19 @@ async function searchVectors(collectionName, vector, limit, scoreThreshold, prop
     }
 }
 async function getCollectionInfo(collectionName) {
-    try {
-        return (await qdrantRequest('/collections/' + collectionName)).result;
-    } catch (error) {
-        return null;
-    }
+    try { return (await qdrantRequest('/collections/' + collectionName)).result; } catch (error) { return null; }
 }
-
 async function countPoints(collectionName) {
-    try {
-        const info = await getCollectionInfo(collectionName);
-        return info ? info.points_count : 0;
-    } catch (error) {
-        return 0;
-    }
+    try { const info = await getCollectionInfo(collectionName); return info ? info.points_count : 0; } catch (error) { return 0; }
 }
-
 async function deleteCollection(collectionName) {
-    try {
-        await qdrantRequest('/collections/' + collectionName, 'DELETE');
-        console.log('[' + MODULE_NAME + '] Deleted collection: ' + collectionName);
-        return true;
-    } catch (error) {
-        if (error.message && error.message.indexOf('404') !== -1) {
-            console.log('[' + MODULE_NAME + '] Collection did not exist: ' + collectionName);
-            return true;
-        }
-        console.error('[' + MODULE_NAME + '] Failed to delete collection:', error);
-        throw error;
-    }
+    try { await qdrantRequest('/collections/' + collectionName, 'DELETE'); return true; } catch (error) { return true; }
 }
-
 async function forceReindexCurrentChat() {
     const chatId = getCurrentChatId();
     if (!chatId) throw new Error('No active chat found');
     const isGroupChat = isCurrentChatGroupChat();
     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
-    console.log('[' + MODULE_NAME + '] Force re-indexing: ' + collectionName);
     updateUI('status', 'Deleting old collection...');
     await deleteCollection(collectionName);
     currentChatIndexed = false;
@@ -707,16 +659,12 @@ async function forceReindexCurrentChat() {
     indexedMessageIds.clear();
     lastKnownSummaries.clear();
     let context;
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-        context = SillyTavern.getContext();
-    } else if (typeof getContext === 'function') {
-        context = getContext();
-    }
+    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
+    else if (typeof getContext === 'function') context = getContext();
     if (!context || !context.chat || context.chat.length === 0) throw new Error('No chat messages to index');
     const jsonl = convertChatToJSONL(context);
     await indexChat(jsonl, chatId, isGroupChat);
     currentChatIndexed = true;
-    console.log('[' + MODULE_NAME + '] Force re-index complete');
 }
 
 // ===========================
@@ -725,15 +673,10 @@ async function forceReindexCurrentChat() {
 
 async function generateEmbedding(text) {
     const provider = extensionSettings.embeddingProvider;
-    try {
-        if (provider === 'kobold') return await generateKoboldEmbedding(text);
-        if (provider === 'ollama') return await generateOllamaEmbedding(text);
-        if (provider === 'openai') return await generateOpenAIEmbedding(text);
-        throw new Error('Unknown embedding provider: ' + provider);
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Failed to generate embedding:', error);
-        throw error;
-    }
+    if (provider === 'kobold') return await generateKoboldEmbedding(text);
+    if (provider === 'ollama') return await generateOllamaEmbedding(text);
+    if (provider === 'openai') return await generateOpenAIEmbedding(text);
+    throw new Error('Unknown embedding provider: ' + provider);
 }
 async function generateKoboldEmbedding(text) {
     const isArray = Array.isArray(text);
@@ -741,7 +684,7 @@ async function generateKoboldEmbedding(text) {
     const response = await fetch(extensionSettings.koboldUrl + '/api/v1/embeddings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ input: input, model: "text-embedding-ada-002" })
     });
-    if (!response.ok) throw new Error('KoboldCpp API error: ' + response.status + ' - ' + await response.text());
+    if (!response.ok) throw new Error('KoboldCpp API error');
     const data = await response.json();
     return isArray ? data.data.map(d => d.embedding) : data.data[0].embedding;
 }
@@ -751,7 +694,7 @@ async function generateOllamaEmbedding(text) {
     const response = await fetch(extensionSettings.ollamaUrl + '/api/embeddings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: extensionSettings.ollamaModel, prompt: text })
     });
-    if (!response.ok) throw new Error('Ollama API error: ' + response.status);
+    if (!response.ok) throw new Error('Ollama API error');
     const data = await response.json();
     return data.embedding;
 }
@@ -762,7 +705,7 @@ async function generateOpenAIEmbedding(text) {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + extensionSettings.openaiApiKey },
         body: JSON.stringify({ model: extensionSettings.openaiModel, input: input })
     });
-    if (!response.ok) throw new Error('OpenAI API error: ' + response.status);
+    if (!response.ok) throw new Error('OpenAI API error');
     const data = await response.json();
     const embeddings = data.data.map(d => d.embedding);
     return isArray ? embeddings : embeddings[0];
@@ -782,21 +725,14 @@ function parseJSONL(jsonlContent) {
             const parsed = JSON.parse(line);
             if (parsed.chat_metadata) chatMetadata = parsed.chat_metadata;
             else if (parsed.mes) messages.push(parsed);
-        } catch (error) {
-            console.error('[' + MODULE_NAME + '] Failed to parse JSONL line:', error);
-        }
+        } catch (error) {}
     }
     return { chatMetadata, messages };
 }
-
-// Helper to reliably extract summary from message object
 function getSummaryFromMsg(msg) {
-    if (msg && msg.extra && msg.extra.qvink_memory && typeof msg.extra.qvink_memory.memory === 'string') {
-        return msg.extra.qvink_memory.memory;
-    }
+    if (msg && msg.extra && msg.extra.qvink_memory && typeof msg.extra.qvink_memory.memory === 'string') return msg.extra.qvink_memory.memory;
     return "";
 }
-
 function buildEmbeddingText(message, tracker) {
     const parts = ['[Character: ' + message.name + ']'];
     if (tracker) {
@@ -804,40 +740,25 @@ function buildEmbeddingText(message, tracker) {
         if (tracker.Topics && tracker.Topics.PrimaryTopic) parts.push('[Topic: ' + tracker.Topics.PrimaryTopic + ']');
         if (tracker.Topics && tracker.Topics.EmotionalTone) parts.push('[Tone: ' + tracker.Topics.EmotionalTone + ']');
     }
-    
     const summary = getSummaryFromMsg(message);
-    if (summary) {
-        parts.push('\nSummary: ' + summary);
-    }
+    if (summary) parts.push('\nSummary: ' + summary);
     parts.push('\nMessage: ' + message.mes);
     return parts.join(' ');
 }
-
 function extractPayload(message, messageIndex, chatIdHash, participantNames) {
     const tracker = message.tracker || {};
     let charactersPresent = (message.present && Array.isArray(message.present))
         ? message.present.map(avatar => avatar.replace(/\.png$/, ''))
         : (tracker.CharactersPresent && Array.isArray(tracker.CharactersPresent) ? tracker.CharactersPresent : []);
-
     if (message.name && message.name !== 'User' && !charactersPresent.some(cp => String(cp).toLowerCase() === String(message.name).toLowerCase())) {
         charactersPresent.push(message.name);
     }
-    
-    // --- Normalize asterisk emphasis before keyword extraction ---
     const normalizedMessage = (message.mes || '').replace(/(\w)\*+(\w)/g, '$1 $2');
-
-    // --- AGGRESSIVE NAME STRIPPING FOR PAYLOAD GENERATION ---
     const textForKeywords = sanitizeTextForKeywords(normalizedMessage, participantNames);
-    
-    // --- The Unified Keyword Pipeline ---
     const properNounCandidates = extractProperNouns(textForKeywords, participantNames);
     const commonKeywordCandidates = extractKeywords(textForKeywords, participantNames);
-
     const allKeywords = new Set([...properNounCandidates, ...commonKeywordCandidates]);
-    // --- End Pipeline ---
-
     const summary = getSummaryFromMsg(message);
-    
     return {
         chat_id_hash: chatIdHash, message_index: messageIndex, character_name: message.name, is_user: !!message.is_user,
         timestamp: message.send_date || '', summary: summary, full_message: message.mes, characters_present: charactersPresent,
@@ -846,12 +767,9 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
         proper_nouns: Array.from(allKeywords)
     };
 }
-
-
 function getQueryMessage(context, idxOverride, generationType) {
     if (idxOverride === undefined) idxOverride = null;
     if (generationType === undefined) generationType = 'normal';
-    
     if (!context || !context.chat || !Array.isArray(context.chat) || context.chat.length === 0) return null;
     if (idxOverride !== null && idxOverride >= 0 && idxOverride < context.chat.length) {
         const m = context.chat[idxOverride];
@@ -875,7 +793,6 @@ function getQueryMessage(context, idxOverride, generationType) {
             return prevMsg;
         }
     }
-    console.log('[' + MODULE_NAME + '] Query: Using last message (idx ' + lastMsgIdx + ', ' + (lastMsg.is_user ? 'user' : lastMsg.name || 'char') + ')');
     return lastMsg;
 }
 
@@ -887,23 +804,18 @@ function getQueryMessage(context, idxOverride, generationType) {
 function constructMultiMessageQuery(context, generationType) {
     const anchorMsg = getQueryMessage(context, null, generationType);
     if (!anchorMsg) return "";
-
     const count = extensionSettings.queryMessageCount || 1;
     const chat = context.chat;
     const anchorIdx = chat.lastIndexOf(anchorMsg);
     if (anchorIdx === -1) return anchorMsg.mes;
-
     const activeChar = getActiveCharacterName();
     const isGroup = isCurrentChatGroupChat();
     const collectedText = [];
-
-    // 1. Gather Chat Context
     let messagesFound = 0;
     let currentIdx = anchorIdx;
     while (messagesFound < count && currentIdx >= 0) {
         const msg = chat[currentIdx];
         if (msg.is_system) { currentIdx--; continue; }
-
         let isVisible = true;
         if (isGroup && activeChar) {
             const isSender = (msg.name === activeChar);
@@ -911,107 +823,74 @@ function constructMultiMessageQuery(context, generationType) {
             const isPresent = presentList.includes(activeChar.toLowerCase());
             if (!isSender && presentList.length > 0 && !isPresent) isVisible = false;
         }
-
         if (isVisible && msg.mes) {
             collectedText.unshift(msg.mes);
             messagesFound++;
         }
         currentIdx--;
     }
-    
     let query = collectedText.join('\n');
-
+    
     // 2. INJECT TRACKER CONTEXT (SYNERGY)
     if (extensionSettings.trackerEnabled) {
         const t = window.RagTrackerState;
-        // This makes Qdrant search for relevant Locations and Moods automatically
         query += `\n[Context: Location is ${t.location}, Mood is ${t.tone}, Time is Day ${t.day} ${t.time}]`;
         console.log(`[${MODULE_NAME}] Enhanced Query with Tracker Context: ${t.location}, ${t.tone}`);
     }
-
     return query;
 }
 
 async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
-    if (isIndexing) {
-        console.log('[' + MODULE_NAME + '] Already indexing, please wait...');
-        return false;
-    }
+    if (isIndexing) return false;
     isIndexing = true;
     shouldStopIndexing = false;
-    console.log('[' + MODULE_NAME + '] Starting indexing process...');
     updateUI('status', 'Preparing to index...');
     showStopButton();
-    
     try {
         const { messages } = parseJSONL(jsonlContent);
-        if (messages.length === 0) throw new Error('No messages found in chat');
-
+        if (messages.length === 0) throw new Error('No messages found');
         const participantNames = getParticipantNames(messages);
-        console.log('[' + MODULE_NAME + '] Excluding participant names: ' + Array.from(participantNames).join(', '));
-        
         const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatIdHash;
         const existingPoints = await countPoints(collectionName);
         if (existingPoints >= messages.length) {
-            console.log('[' + MODULE_NAME + '] Collection already fully indexed (' + existingPoints + ' points)');
-            updateUI('status', 'Chat already indexed (' + existingPoints + ' messages)');
+            updateUI('status', 'Chat already indexed');
             isIndexing = false;
             hideStopButton();
-            // Populate tracker for existing messages to catch updates
-            messages.forEach((msg, idx) => {
-                lastKnownSummaries.set(idx, getSummaryFromMsg(msg));
-            });
+            messages.forEach((msg, idx) => { lastKnownSummaries.set(idx, getSummaryFromMsg(msg)); });
             return true;
         }
-        
-        console.log('[' + MODULE_NAME + '] Need to index ' + messages.length + ' messages (existing: ' + existingPoints + ')');
         updateUI('status', 'Getting embedding dimensions...');
         const vectorSize = (await generateEmbedding(buildEmbeddingText(messages[0], messages[0].tracker))).length;
         await createCollection(collectionName, vectorSize);
-        
         const EMBEDDING_BATCH_SIZE = 1024;
         const upsertBatchSize = 10;
-        
         for (let batchStart = 0; batchStart < messages.length; batchStart += EMBEDDING_BATCH_SIZE) {
             if (shouldStopIndexing) {
-                console.log('[' + MODULE_NAME + '] Indexing stopped by user.');
-                updateUI('status', 'Stopped at ' + batchStart + '/' + messages.length);
                 isIndexing = false;
                 hideStopButton();
                 return false;
             }
-            
             const batchEnd = Math.min(batchStart + EMBEDDING_BATCH_SIZE, messages.length);
             const batchMessages = messages.slice(batchStart, batchEnd);
             updateUI('status', 'Indexing ' + batchStart + '-' + batchEnd + '/' + messages.length + '...');
-            
             const embeddingTexts = batchMessages.map(msg => buildEmbeddingText(msg, msg.tracker));
             const embeddings = await generateEmbedding(embeddingTexts);
-            
             const points = [];
             for (let i = 0; i < batchMessages.length; i++) {
                 const message = batchMessages[i];
                 const messageIndex = batchStart + i;
                 const payload = extractPayload(message, messageIndex, chatIdHash, participantNames);
                 points.push({ id: generateUUID(), vector: embeddings[i], payload: payload });
-                
-                // Track summary state
                 lastKnownSummaries.set(messageIndex, getSummaryFromMsg(message));
-
                 if (points.length >= upsertBatchSize) {
                     await upsertVectors(collectionName, [...points]);
                     points.length = 0;
                 }
             }
-            if (points.length > 0) {
-                await upsertVectors(collectionName, points);
-            }
+            if (points.length > 0) await upsertVectors(collectionName, points);
         }
-        
         updateUI('status', 'Successfully indexed ' + messages.length + ' messages!');
-        console.log('[' + MODULE_NAME + '] Successfully indexed ' + messages.length + ' messages');
     } catch (error) {
-        console.error('[' + MODULE_NAME + '] Indexing failed:', error);
         updateUI('status', 'Indexing failed: ' + error.message);
     } finally {
         isIndexing = false;
@@ -1019,7 +898,6 @@ async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
         hideStopButton();
     }
 }
-
 
 async function indexSingleMessage(message, chatIdHash, messageIndex, isGroupChat = false) {
     try {
@@ -1029,111 +907,47 @@ async function indexSingleMessage(message, chatIdHash, messageIndex, isGroupChat
         const payload = extractPayload(message, messageIndex, chatIdHash, participantNames);
         const point = { id: generateUUID(), vector: embedding, payload: payload };
         await upsertVectors(collectionName, [point]);
-        
-        // Track summary state
         lastKnownSummaries.set(messageIndex, getSummaryFromMsg(message));
-        
-        console.log('[' + MODULE_NAME + '] Indexed message ' + messageIndex);
         return true;
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Failed to index message:', error);
-        return false;
-    }
+    } catch (error) { return false; }
 }
-
-// ===========================
-// Context Retrieval
-// ===========================
 
 async function retrieveContext(query, chatIdHash, isGroupChat = false) {
     try {
         const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatIdHash;
-        let context = null;
-        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-            context = SillyTavern.getContext();
-        } else if (typeof getContext === 'function') {
-            context = getContext();
-        }
-        
-        const excludeCount = extensionSettings.excludeLastMessages !== undefined ? extensionSettings.excludeLastMessages : 2;
+        let context = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
+        const excludeCount = extensionSettings.excludeLastMessages || 2;
         const maxIndex = (context && context.chat) ? Math.max(0, context.chat.length - excludeCount) : 999999999;
-        
         const participantNames = getParticipantNames(null);
-
-        // --- PATH A: DENSE VECTOR (KEEPS NAMES) ---
         const queryEmbedding = await generateEmbedding(query);
-        
-        // --- PATH B: KEYWORD FILTER (STRIPS NAMES) ---
         const textForKeywords = sanitizeTextForKeywords(query, participantNames);
         const queryFilterTerms = extractQueryFilterTerms(textForKeywords, participantNames);
-        
-        if (queryFilterTerms.length > 0) {
-             console.log('[' + MODULE_NAME + '] Query Keywords (Names Removed):', queryFilterTerms);
-        }
-
         const results = await searchVectors(collectionName, queryEmbedding, extensionSettings.retrievalCount, extensionSettings.similarityThreshold, queryFilterTerms, maxIndex);
-        
-        if (results.length === 0) {
-            console.log('[' + MODULE_NAME + '] No relevant context found');
-            return '';
-        }
-
+        if (results.length === 0) return '';
         const activeChar = getActiveCharacterName();
         let filteredByPresence = results;
         if (activeChar) {
             const target = activeChar.toLowerCase();
             filteredByPresence = results.filter(r => (r.payload.characters_present || []).some(name => String(name).toLowerCase() === target));
-            if (filteredByPresence.length !== results.length) {
-                console.log('[' + MODULE_NAME + '] Filtered out ' + (results.length - filteredByPresence.length) + ' result(s) where "' + activeChar + '" was not present');
-            }
         }
-        if (filteredByPresence.length === 0) {
-            console.log('[' + MODULE_NAME + '] No context left after characters_present filter');
-            return '';
-        }
+        if (filteredByPresence.length === 0) return '';
         
-        console.log('[' + MODULE_NAME + '] Retrieved ' + filteredByPresence.length + ' messages with scores:', filteredByPresence.map(r => r.score.toFixed(3)).join(', '));
-        
-        // --- CONTEXT BUDGETING (TOKEN BASED) ---
         let currentTotalTokens = 0;
         const contextParts = [];
         const tokenBudget = extensionSettings.maxTokenBudget || 1000;
-        let budgetHit = false;
-
         for (const result of filteredByPresence) {
             const p = result.payload;
             const score = result.score;
-            let text = `\n[Character: ${p.character_name}]\n[Time: ${p.timestamp}]\n[Relevance Score: ${score.toFixed(3)} (${result._source || 'unknown'})]`;
+            let text = `\n[Character: ${p.character_name}]\n[Time: ${p.timestamp}]\n[Relevance Score: ${score.toFixed(3)}]`;
             if (p.summary) text += `\n\nSummary: ${p.summary}`;
             text += `\n\nFull Message: ${p.full_message}`;
-
             const estimatedTokens = Math.ceil(text.length / 4);
-
-            if (currentTotalTokens + estimatedTokens > tokenBudget) {
-                budgetHit = true;
-                console.log('[' + MODULE_NAME + '] Token budget hit! Stopping addition of lower-scoring results.');
-                break;
-            }
-
+            if (currentTotalTokens + estimatedTokens > tokenBudget) break;
             contextParts.push(text);
             currentTotalTokens += estimatedTokens;
         }
-
-        if (budgetHit) {
-            const warningMsg = `(RAG Budget reached! Only injecting ${contextParts.length} entries!)`;
-            updateUI('status', '⚠️ ' + warningMsg);
-            if (typeof toastr !== 'undefined') {
-                toastr.warning(warningMsg, 'RagForDummies');
-            }
-        }
-
-        const contextString = '\n\n========== RELEVANT PAST CONTEXT FROM RAG ==========\n' + contextParts.join('\n\n-------------------\n') + '\n\n========== END RAG CONTEXT ==========\n\n';
-        console.log('[' + MODULE_NAME + '] Formatted context with full metadata (' + contextString.length + ' chars, approx ' + Math.ceil(contextString.length/4) + ' tokens)');
-        return contextString;
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Context retrieval failed:', error);
-        return '';
-    }
+        return '\n\n========== RELEVANT PAST CONTEXT ==========\n' + contextParts.join('\n\n-------------------\n') + '\n\n========== END CONTEXT ==========\n\n';
+    } catch (error) { return ''; }
 }
 
 // ===========================
@@ -1144,35 +958,23 @@ function getCurrentChatId() {
     try {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
-        else if (typeof getContext === 'function') context = getContext();
         return (context && context.chatMetadata && context.chatMetadata.chat_id_hash) || (context && context.chat_id) || null;
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Error getting chat ID:', error);
-        return null;
-    }
+    } catch (error) { return null; }
 }
 function getActiveCharacterName() {
     try {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
-        else if (typeof getContext === 'function') context = getContext();
         if (!context) return null;
         return context.character?.name || context.chatMetadata?.character_name || context.main?.name || null;
-    } catch (e) {
-        console.warn('[' + MODULE_NAME + '] getActiveCharacterName failed:', e);
-    }
-    return null;
+    } catch (e) { return null; }
 }
 function isCurrentChatGroupChat() {
     try {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
-        else if (typeof getContext === 'function') context = getContext();
         return context && context.groupId !== null && context.groupId !== undefined;
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Error checking group chat:', error);
-        return false;
-    }
+    } catch (error) { return false; }
 }
 async function onChatLoaded() {
     currentChatIndexed = false;
@@ -1181,21 +983,14 @@ async function onChatLoaded() {
     lastKnownSummaries.clear();
     const chatId = getCurrentChatId();
     lastChatId = chatId;
-    
-    // Tracker HUD Update on load
-    tracker_updateHud();
-
-    console.log('[' + MODULE_NAME + '] Chat loaded. Chat ID:', chatId);
+    tracker_updateHud(); // Tracker HUD init
     updateUI('status', 'Chat loaded - checking index...');
     try {
         let context = null;
         if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
-        else if (typeof getContext === 'function') context = getContext();
         if (context && context.chat) {
             lastMessageCount = context.chat.length;
-            context.chat.forEach((msg, idx) => {
-                lastKnownSummaries.set(idx, getSummaryFromMsg(msg));
-            });
+            context.chat.forEach((msg, idx) => { lastKnownSummaries.set(idx, getSummaryFromMsg(msg)); });
         }
         if (chatId) {
             const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
@@ -1203,13 +998,9 @@ async function onChatLoaded() {
             if (pointCount > 0) {
                 currentChatIndexed = true;
                 updateUI('status', 'Indexed (' + pointCount + ' messages)');
-            } else {
-                updateUI('status', 'Ready to index');
-            }
+            } else { updateUI('status', 'Ready to index'); }
         }
-    } catch (error) {
-        console.error('[' + MODULE_NAME + '] Error in onChatLoaded:', error);
-    }
+    } catch (error) {}
 }
 async function onMessageSent(messageData) {
     if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
@@ -1217,37 +1008,27 @@ async function onMessageSent(messageData) {
     if (!chatId) return;
     const isGroupChat = isCurrentChatGroupChat();
     if (!currentChatIndexed && typeof SillyTavern !== 'undefined') {
-        try {
-            const context = SillyTavern.getContext();
-            if (context.chat && context.chat.length > 0) {
-                await indexChat(convertChatToJSONL(context), chatId, isGroupChat);
-                currentChatIndexed = true;
-            }
-        } catch (error) {
-            console.error('[' + MODULE_NAME + '] Auto-indexing failed:', error);
+        const context = SillyTavern.getContext();
+        if (context.chat && context.chat.length > 0) {
+            await indexChat(convertChatToJSONL(context), chatId, isGroupChat);
+            currentChatIndexed = true;
         }
     }
-    if (messageData && currentChatIndexed) {
-        await indexSingleMessage(messageData, chatId, SillyTavern.getContext().chat.length - 1, isGroupChat);
-    }
+    if (messageData && currentChatIndexed) await indexSingleMessage(messageData, chatId, SillyTavern.getContext().chat.length - 1, isGroupChat);
 }
 async function onMessageReceived(messageData) {
     if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
     const chatId = getCurrentChatId();
     if (!chatId) return;
     if (currentChatIndexed && typeof SillyTavern !== 'undefined') {
-        try {
-            const context = SillyTavern.getContext();
-            if (context.chat && context.chat.length > 0) {
-                const messageIndex = context.chat.length - 1;
-                if (!indexedMessageIds.has(messageIndex)) {
-                    await indexSingleMessage(context.chat[messageIndex], chatId, messageIndex, isCurrentChatGroupChat());
-                    indexedMessageIds.add(messageIndex);
-                    lastMessageCount = context.chat.length;
-                }
+        const context = SillyTavern.getContext();
+        if (context.chat && context.chat.length > 0) {
+            const messageIndex = context.chat.length - 1;
+            if (!indexedMessageIds.has(messageIndex)) {
+                await indexSingleMessage(context.chat[messageIndex], chatId, messageIndex, isCurrentChatGroupChat());
+                indexedMessageIds.add(messageIndex);
+                lastMessageCount = context.chat.length;
             }
-        } catch (error) {
-            console.error('[' + MODULE_NAME + '] Failed to index received message:', error);
         }
     }
 }
@@ -1261,34 +1042,23 @@ async function onMessageSwiped(data) {
         try {
             if (!currentChatIndexed && await countPoints(collectionName) === 0) return;
             currentChatIndexed = true;
-            const context = await (async (idx, maxWaitMs = 2500) => {
-                const start = Date.now();
-                const readCtx = () => {
-                    const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
-                    return { ctx, mes: (ctx?.chat?.[idx])?.mes || null };
-                };
-                const { mes: initial } = readCtx();
+            const context = await (async (idx) => {
+                const readCtx = () => SillyTavern.getContext();
+                const { mes: initial } = readCtx().chat[idx] || {};
                 let lastSeen = initial, stableCount = 0;
-                while (Date.now() - start < maxWaitMs) {
+                while (stableCount < 2) {
                     await new Promise(res => setTimeout(res, 100));
-                    const { ctx, mes } = readCtx();
-                    if (!ctx?.chat?.[idx] || (mes === initial)) continue;
-                    if (mes === lastSeen) stableCount++; else { stableCount = 1; lastSeen = mes; }
-                    if (stableCount >= 2) { await new Promise(res => setTimeout(res, 100)); return ctx; }
+                    const mes = (readCtx().chat[idx] || {}).mes;
+                    if (mes === lastSeen) stableCount++; else { stableCount = 0; lastSeen = mes; }
                 }
-                return readCtx().ctx;
+                return readCtx();
             })(targetIndex !== null ? targetIndex : (SillyTavern.getContext()?.chat.length - 1 || 0));
             if (!context?.chat?.length) return;
-            if (targetIndex === null || targetIndex < 0 || targetIndex >= context.chat.length) targetIndex = context.chat.length - 1;
+            if (targetIndex === null || targetIndex < 0) targetIndex = context.chat.length - 1;
             const message = context.chat[targetIndex];
-            if (!message) return;
             await deleteMessageByIndex(collectionName, chatId, targetIndex);
             await indexSingleMessage(message, chatId, targetIndex, isCurrentChatGroupChat());
-            indexedMessageIds.add(targetIndex);
-            console.log('[' + MODULE_NAME + '] Swipe: re-indexed message ' + targetIndex);
-        } catch (err) {
-            console.error('[' + MODULE_NAME + '] Swipe reindex failed:', err);
-        }
+        } catch (err) {}
     })();
 }
 async function onMessageDeleted(data) {
@@ -1296,54 +1066,34 @@ async function onMessageDeleted(data) {
     const chatId = getCurrentChatId();
     if (!chatId) return;
     const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
-    if (!currentChatIndexed) {
-        try { if (await countPoints(collectionName) === 0) return; currentChatIndexed = true; } catch (e) { return; }
-    }
     const messageIndex = typeof data === 'number' ? data : null;
     if (messageIndex === null) return;
     await deleteMessageByIndex(collectionName, chatId, messageIndex);
-    indexedMessageIds.delete(messageIndex);
-    lastKnownSummaries.delete(messageIndex);
 }
 async function onMessageEdited(data) {
     if (!extensionSettings.enabled) return;
     const chatId = getCurrentChatId();
     if (!chatId) return;
     const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
-    if (!currentChatIndexed) {
-        try { if (await countPoints(collectionName) === 0) return; currentChatIndexed = true; } catch (e) { return; }
-    }
     const messageIndex = typeof data === 'number' ? data : (data && typeof data.index === 'number' ? data.index : null);
     if (messageIndex === null) return;
-    try {
-        let context = null;
-        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
-        else if (typeof getContext === 'function') context = getContext();
-        if (!context?.chat?.[messageIndex]) return;
-        const message = context.chat[messageIndex];
-        await deleteMessageByIndex(collectionName, chatId, messageIndex);
-        await indexSingleMessage(message, chatId, messageIndex, isCurrentChatGroupChat());
-        console.log('[' + MODULE_NAME + '] Edit: re-indexed message ' + messageIndex);
-    } catch (err) {
-        console.error('[' + MODULE_NAME + '] Edit reindex failed:', err);
-    }
+    const context = SillyTavern.getContext();
+    if (!context?.chat?.[messageIndex]) return;
+    const message = context.chat[messageIndex];
+    await deleteMessageByIndex(collectionName, chatId, messageIndex);
+    await indexSingleMessage(message, chatId, messageIndex, isCurrentChatGroupChat());
 }
 async function startPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
     pollingInterval = setInterval(async () => {
         try {
-            // STOP if indexing is already busy (prevents database locking/race conditions)
             if (isIndexing) return;
             if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
-            
             const chatId = getCurrentChatId();
             if (!chatId) return;
-            let context = null;
-            if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
-            else if (typeof getContext === 'function') context = getContext();
+            let context = SillyTavern.getContext();
             if (!context?.chat) return;
             const isGroupChat = isCurrentChatGroupChat();
-            
             if (!currentChatIndexed) {
                 if (context.chat.length === 0) return;
                 await indexChat(convertChatToJSONL(context), chatId, isGroupChat);
@@ -1351,8 +1101,6 @@ async function startPolling() {
                 lastMessageCount = context.chat.length;
                 return;
             }
-            
-            // 1. Check for NEW messages (Only if NOT using Event Source)
             if (!eventsRegistered) {
                 if (context.chat.length > lastMessageCount) {
                     for (let i = lastMessageCount; i < context.chat.length; i++) {
@@ -1361,39 +1109,19 @@ async function startPolling() {
                     }
                     lastMessageCount = context.chat.length;
                 }
-            } else {
-                lastMessageCount = context.chat.length; 
-            }
-            
-            // 2. --- Qvlink Summary Sync ---
+            } else lastMessageCount = context.chat.length; 
             for (let i = 0; i < context.chat.length; i++) {
                 const msg = context.chat[i];
                 const currentSum = getSummaryFromMsg(msg);
                 const knownSum = lastKnownSummaries.get(i);
-                
                 if (lastKnownSummaries.has(i) && currentSum !== knownSum) {
-                    console.log('[' + MODULE_NAME + '] [Qvlink Sync] Summary changed for message ' + i + '. Re-indexing...');
-                    updateUI('status', '↻ Syncing summary for msg #' + i);
                     lastKnownSummaries.set(i, currentSum); 
                     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
                     await deleteMessageByIndex(collectionName, chatId, i);
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
-                    
-                    setTimeout(() => {
-                        const statusEl = document.getElementById('ragfordummies_status');
-                        if (statusEl && statusEl.textContent.indexOf('Syncing summary') !== -1) {
-                            statusEl.textContent = 'Ready';
-                        }
-                    }, 2000);
-                } 
-                else if (!lastKnownSummaries.has(i)) {
-                    lastKnownSummaries.set(i, currentSum);
-                }
+                } else if (!lastKnownSummaries.has(i)) lastKnownSummaries.set(i, currentSum);
             }
-            
-        } catch (e) {
-            console.warn('[' + MODULE_NAME + '] Polling error:', e.message);
-        }
+        } catch (e) {}
     }, 3000);
 }
 async function injectContextWithSetExtensionPrompt(generationType) {
@@ -1402,125 +1130,68 @@ async function injectContextWithSetExtensionPrompt(generationType) {
     if (!chatId) return;
     if (!currentChatIndexed) {
         const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
-        try {
-            if (await countPoints(collectionName) > 0) currentChatIndexed = true;
-            else return;
-        } catch (e) { return; }
+        try { if (await countPoints(collectionName) > 0) currentChatIndexed = true; else return; } catch (e) { return; }
     }
-    let context = null;
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
-    else if (typeof getContext === 'function') context = getContext();
+    let context = SillyTavern.getContext();
     if (!context?.chat?.length || !context.setExtensionPrompt) return;
-    
-    // NEW QUERY CONSTRUCTION
     const queryText = constructMultiMessageQuery(context, generationType);
     if (!queryText) return;
-    
-    console.log('[' + MODULE_NAME + '] Generating query embedding for text: "' + queryText.substring(0, 100).replace(/\n/g, ' ') + '..."');
-    
     const retrievedContext = await retrieveContext(queryText.substring(0, 2000), chatId, isCurrentChatGroupChat());
     if (!retrievedContext) return;
-    
     let position = 1, depth = 4;
     if (extensionSettings.injectionPosition === 'before_main') { position = 0; depth = 0; }
     else if (extensionSettings.injectionPosition === 'after_main') { position = 1; depth = 0; }
     else if (extensionSettings.injectionPosition === 'after_messages') { position = 1; depth = extensionSettings.injectAfterMessages || 3; }
     const formattedContext = '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]';
-    try {
-        context.setExtensionPrompt(MODULE_NAME, formattedContext, position, depth);
-        updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
-    } catch (e) {
-        console.error('[' + MODULE_NAME + '] setExtensionPrompt failed:', e);
-    }
-}
-async function injectContextBeforeGeneration(data) {
-    if (Date.now() - lastInjectionTime < INJECTION_DEBOUNCE_MS || !data?.chat?.length || data.chat.length <= 5 || !extensionSettings.enabled || !extensionSettings.injectContext) return;
-    const chatId = getCurrentChatId();
-    if (!chatId) return;
-    if (!currentChatIndexed) {
-        const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
-        try { if (await countPoints(collectionName) > 0) currentChatIndexed = true; else return; } catch (e) { return; }
-    }
-    let context = null;
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) context = SillyTavern.getContext();
-    else if (typeof getContext === 'function') context = getContext();
-    if (!context?.chat?.length) return;
-    
-    const queryText = constructMultiMessageQuery(context, 'normal');
-    if (!queryText) return;
-
-    const retrievedContext = await retrieveContext(queryText.substring(0, 2000), chatId, isCurrentChatGroupChat());
-    if (!retrievedContext) return;
-    
-    const ragMessage = { role: 'system', content: '[Relevant context from earlier in conversation:\n' + retrievedContext + '\n]' };
-    let insertIndex = 0;
-    if (extensionSettings.injectionPosition === 'before_main') insertIndex = 0;
-    else if (extensionSettings.injectionPosition === 'after_main') {
-        for (let i = 0; i < data.chat.length; i++) {
-            if (data.chat[i].role === 'user' || data.chat[i].role === 'assistant') { insertIndex = i; break; }
-            insertIndex = i + 1;
-        }
-    } else if (extensionSettings.injectionPosition === 'after_messages') {
-        insertIndex = Math.max(0, data.chat.length - (extensionSettings.injectAfterMessages || 3));
-    }
-    data.chat.splice(insertIndex, 0, ragMessage);
-    lastInjectionTime = Date.now();
-    updateUI('status', 'Context injected (' + retrievedContext.length + ' chars)');
+    context.setExtensionPrompt(MODULE_NAME, formattedContext, position, depth);
+    updateUI('status', 'Context injected');
 }
 
 // ===========================
-// NEW LISTENERS FOR TRACKER
+// LISTENERS (Tracker + RAG)
 // ===========================
 
 const tracker_onPromptGeneration = (data) => {
     if (!extensionSettings.trackerEnabled) return data;
-    
-    // Inject the Tracker Instructions into the PROMPT (not context)
     const s = window.RagTrackerState;
-    const instruction = `
-\n[SYSTEM INSTRUCTION: STATE TRACKING]
+    const instruction = `\n[SYSTEM INSTRUCTION: STATE TRACKING]
 Current Simulation Time: Day ${s.day}, ${s.time}.
 Location Context: ${s.location}.
 START every response with a hidden state block exactly like this:
 \`⦗ Loc: <Current Location> | Wear: <Outfit Condition> | Tone: <Emotional Tone> | Topic: <Main Subject> | Act: <Physical Action> ⦘\`
-Ensure the response that follows strictly adheres to this state.
-`;
-
-    if (data && data.prompt) {
-        data.prompt += instruction;
-    }
+Ensure the response that follows strictly adheres to this state.`;
+    if (data && data.prompt) data.prompt += instruction;
     return data;
 };
 
 const tracker_onReplyProcessed = (data) => {
     if (!extensionSettings.trackerEnabled) return data;
-
     const rawMsg = data.text;
     const regex = /⦗(.*?)⦘/s;
     const match = rawMsg.match(regex);
-
     if (match) {
         const content = match[1];
         tracker_parseStateString(content);
-        data.text = rawMsg.replace(regex, "").trim();
         tracker_advanceTime(extensionSettings.trackerTimeStep);
+        const s = window.RagTrackerState;
+        
+        let inlineHtml = '';
+        if (extensionSettings.trackerInline) {
+            inlineHtml = `
+            <div class="tracker-inline-box">
+                <span class="tracker-item t-time" title="Time"><span class="tracker-icon">🕒</span><span class="tracker-value">D${s.day} ${s.time}</span></span>
+                <span class="tracker-item t-loc" title="Location"><span class="tracker-icon">📍</span><span class="tracker-value">${s.location}</span></span>
+                <span class="tracker-item t-wear" title="Outfit"><span class="tracker-icon">👕</span><span class="tracker-value">${s.clothing}</span></span>
+                <span class="tracker-item t-tone" title="Tone"><span class="tracker-icon">💭</span><span class="tracker-value">${s.tone}</span></span>
+            </div>\n`;
+        }
+        data.text = inlineHtml + rawMsg.replace(regex, "").trim();
     }
     return data;
 };
 
-
-// ===========================
-// UI Functions
-// ===========================
-
-function showStopButton() {
-    const btn = document.getElementById('ragfordummies_stop_indexing');
-    if (btn) btn.classList.add('active');
-}
-function hideStopButton() {
-    const btn = document.getElementById('ragfordummies_stop_indexing');
-    if (btn) btn.classList.remove('active');
-}
+function showStopButton() { const btn = document.getElementById('ragfordummies_stop_indexing'); if (btn) btn.classList.add('active'); }
+function hideStopButton() { const btn = document.getElementById('ragfordummies_stop_indexing'); if (btn) btn.classList.remove('active'); }
 function updateUI(element, value) {
     const el = document.getElementById('ragfordummies_' + element);
     if (el) {
@@ -1535,45 +1206,31 @@ function createSettingsUI() {
             <div class="inline-drawer-content">
                 <div class="ragfordummies-settings">
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
-                    
-                    <!-- NEW TRACKER SECTION -->
                     <div class="ragfordummies-section">
-                        <div class="inline-drawer">
+                        <div id="rag_tracker_drawer" class="inline-drawer">
                             <div class="inline-drawer-toggle inline-drawer-header"><b>Simulation & State Tracker</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down"></div></div>
                             <div class="inline-drawer-content">
                                 <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_enabled" ${extensionSettings.trackerEnabled ? 'checked' : ''} />Enable Zero-Latency Tracking</label>
                                 <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_hud" ${extensionSettings.trackerHud ? 'checked' : ''} />Show HUD on Chat</label>
-                                <div class="flex-container">
-                                    <label>Minutes per Turn</label>
-                                    <input type="number" id="ragfordummies_tracker_time_step" class="text_pole" value="${extensionSettings.trackerTimeStep}" min="1" max="1440">
-                                </div>
-                                <hr>
-                                <small>Forces AI to track clothing, location, and time automatically. This info improves RAG search results.</small>
+                                <label class="checkbox_label"><input type="checkbox" id="ragfordummies_tracker_inline" ${extensionSettings.trackerInline ? 'checked' : ''} />Show Inline Chat Status</label>
+                                <div class="flex-container"><label>Minutes per Turn</label><input type="number" id="ragfordummies_tracker_time_step" class="text_pole" value="${extensionSettings.trackerTimeStep}" min="1" max="1440"></div>
+                                <hr><small>Forces AI to track clothing, location, and time automatically. This info improves RAG search results.</small>
+                                <div style="margin-top:10px; padding:5px; background:rgba(0,0,0,0.2); border-radius:4px; font-family:monospace; font-size:0.8em;"><strong>Current State:</strong><br><span id="rag_tracker_debug_display">Waiting for next message...</span></div>
                             </div>
                         </div>
                     </div>
-                    <!-- END TRACKER SECTION -->
-
                     <div class="ragfordummies-section"><h4>Qdrant Configuration</h4><label><span>Local URL:</span><input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" placeholder="http://localhost:6333" /></label></div>
                     <div class="ragfordummies-section"><h4>Embedding Provider</h4><label><span>Provider:</span><select id="ragfordummies_embedding_provider"><option value="kobold" ${extensionSettings.embeddingProvider === 'kobold' ? 'selected' : ''}>KoboldCpp</option><option value="ollama" ${extensionSettings.embeddingProvider === 'ollama' ? 'selected' : ''}>Ollama</option><option value="openai" ${extensionSettings.embeddingProvider === 'openai' ? 'selected' : ''}>OpenAI</option></select></label><label id="ragfordummies_kobold_settings" style="${extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none'}"><span>KoboldCpp URL:</span><input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" placeholder="http://localhost:11434" /></label><div id="ragfordummies_ollama_settings" style="${extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none'}"><label><span>Ollama URL:</span><input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" placeholder="http://localhost:11434" /></label><label><span>Ollama Model:</span><input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" placeholder="nomic-embed-text" /></label></div><div id="ragfordummies_openai_settings" style="${extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none'}"><label><span>OpenAI API Key:</span><input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" placeholder="sk-..." /></label><label><span>OpenAI Model:</span><input type="text" id="ragfordummies_openai_model" value="${extensionSettings.openaiModel}" placeholder="text-embedding-3-small" /></label></div></div>
-                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Query Context Messages:</span><input type="number" id="ragfordummies_query_message_count" value="${extensionSettings.queryMessageCount}" min="1" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">How many recent messages to combine for the search query. Higher = better topic understanding.</small></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /><small style="opacity:0.7; display:block; margin-top:5px;">Budget for injected context. Lower budget = less context injected (least relevant information will be thrown away)</small></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /><small style="opacity:0.7; display:block; margin-top:5px;">Prevent RAG from fetching the messages currently in context (usually 2)</small></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
-                    <div class="ragfordummies-section"><h4>Custom Keyword Blacklist</h4><label><span>Blacklisted Terms (comma-separated):</span><input type="text" id="ragfordummies_user_blacklist" value="${extensionSettings.userBlacklist || ''}" placeholder="baka, sweetheart, darling" /></label><small style="opacity:0.7; display:block; margin-top:5px;">Can be useful for things like pet names between you and your character appearing in the hybrid search. (Most likely not needed, as vector scoring takes care of this.) Do not touch unless you know what you're doing.</small></div>
-                    <div class="ragfordummies-section"><h4>Context Injection Position</h4><label><span>Injection Position:</span><select id="ragfordummies_injection_position"><option value="before_main" ${extensionSettings.injectionPosition === 'before_main' ? 'selected' : ''}>Before Main Prompt</option><option value="after_main" ${extensionSettings.injectionPosition === 'after_main' ? 'selected' : ''}>After Main Prompt</option><option value="after_messages" ${extensionSettings.injectionPosition === 'after_messages' ? 'selected' : ''}>After X Messages</option></select></label><label id="ragfordummies_inject_after_messages_setting" style="${extensionSettings.injectionPosition === 'after_messages' ? '' : 'display:none'}"><span>Messages from End:</span><input type="number" id="ragfordummies_inject_after_messages" value="${extensionSettings.injectAfterMessages}" min="0" max="50" /><small style="opacity:0.7; display:block; margin-top:5px;">0 = at the very end, 3 = after last 3 messages</small></label></div>
+                    <div class="ragfordummies-section"><h4>RAG Settings</h4><label><span>Retrieval Count:</span><input type="number" id="ragfordummies_retrieval_count" value="${extensionSettings.retrievalCount}" min="1" max="20" /></label><label><span>Similarity Threshold:</span><input type="number" id="ragfordummies_similarity_threshold" value="${extensionSettings.similarityThreshold}" min="0" max="1" step="0.1" /></label><label><span>Query Context Messages:</span><input type="number" id="ragfordummies_query_message_count" value="${extensionSettings.queryMessageCount}" min="1" max="10" /></label><label><span>Context Budget (Tokens):</span><input type="number" id="ragfordummies_max_token_budget" value="${extensionSettings.maxTokenBudget || 1000}" min="100" max="5000" /></label><label><span>Exclude Recent Messages:</span><input type="number" id="ragfordummies_exclude_last_messages" value="${extensionSettings.excludeLastMessages}" min="0" max="10" /></label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_auto_index" ${extensionSettings.autoIndex ? 'checked' : ''} />Auto-index on first message</label><label class="checkbox_label"><input type="checkbox" id="ragfordummies_inject_context" ${extensionSettings.injectContext ? 'checked' : ''} />Inject context into prompt</label></div>
                     <div class="ragfordummies-section"><h4>Manual Operations</h4><button id="ragfordummies_index_current" class="menu_button">Index Current Chat</button><button id="ragfordummies_force_reindex" class="menu_button">Force Re-index (Rebuild)</button><button id="ragfordummies_stop_indexing" class="menu_button ragfordummies-stop-btn">Stop Indexing</button><hr style="border-color: var(--SmartThemeBorderColor); margin: 10px 0;" /><label class="checkbox_label" style="margin-bottom: 8px;"><input type="checkbox" id="ragfordummies_merge_uploads" checked /><span>Merge uploads into current chat collection</span></label><button id="ragfordummies_upload_btn" class="menu_button">Upload File (JSONL or txt)</button><input type="file" id="ragfordummies_file_input" accept=".jsonl,.txt" style="display:none" /><div id="ragfordummies_status" class="ragfordummies-status">Ready</div></div>
                 </div>
             </div>
         </div>`;
     return html;
 }
+
 function attachEventListeners() {
-    const settingIds = [
-        'enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 
-        'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index', 
-        'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
-        'max_token_budget',
-        // Tracker Settings
-        'tracker_enabled', 'tracker_hud', 'tracker_time_step'
-    ];
+    const settingIds = ['enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model', 'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index', 'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist', 'max_token_budget', 'tracker_enabled', 'tracker_hud', 'tracker_time_step', 'tracker_inline'];
     settingIds.forEach(id => {
         const element = document.getElementById('ragfordummies_' + id);
         if (element) {
@@ -1586,52 +1243,31 @@ function attachEventListeners() {
                     if (element.checked && !pollingInterval) startPolling();
                     else if (!element.checked && pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
                 }
-                
-                // Tracker Specific: UI Update
                 if (id === 'tracker_hud') tracker_updateHud();
-
                 saveSettings();
             });
         }
     });
-    
+    // ... (rest of standard listeners for providers/buttons) ...
     document.getElementById('ragfordummies_embedding_provider')?.addEventListener('change', function() {
         const provider = this.value;
         document.getElementById('ragfordummies_kobold_settings').style.display = provider === 'kobold' ? '' : 'none';
         document.getElementById('ragfordummies_ollama_settings').style.display = provider === 'ollama' ? '' : 'none';
         document.getElementById('ragfordummies_openai_settings').style.display = provider === 'openai' ? '' : 'none';
     });
-    
-    document.getElementById('ragfordummies_injection_position')?.addEventListener('change', function() {
-        document.getElementById('ragfordummies_inject_after_messages_setting').style.display = this.value === 'after_messages' ? '' : 'none';
-    });
-    
     document.getElementById('ragfordummies_index_current')?.addEventListener('click', async () => {
         try {
             const chatId = getCurrentChatId();
             if (!chatId) { updateUI('status', '✗ No active chat found'); return; }
             await indexChat(convertChatToJSONL(SillyTavern.getContext()), chatId, isCurrentChatGroupChat());
             currentChatIndexed = true;
-        } catch (error) {
-            updateUI('status', '✗ Indexing failed: ' + error.message);
-        }
+        } catch (error) { updateUI('status', '✗ Indexing failed: ' + error.message); }
     });
-
     document.getElementById('ragfordummies_force_reindex')?.addEventListener('click', async () => {
         if (!confirm('This will delete and rebuild the index. Continue?')) return;
-        try {
-            await forceReindexCurrentChat();
-            updateUI('status', '✓ Force re-index complete!');
-        } catch (error) {
-            updateUI('status', '✗ Force re-index failed: ' + error.message);
-        }
+        try { await forceReindexCurrentChat(); updateUI('status', '✓ Force re-index complete!'); } catch (error) { updateUI('status', '✗ Force re-index failed: ' + error.message); }
     });
-
-    document.getElementById('ragfordummies_stop_indexing')?.addEventListener('click', () => {
-        shouldStopIndexing = true;
-        updateUI('status', 'Stopping...');
-    });
-    
+    document.getElementById('ragfordummies_stop_indexing')?.addEventListener('click', () => { shouldStopIndexing = true; updateUI('status', 'Stopping...'); });
     const uploadBtn = document.getElementById('ragfordummies_upload_btn');
     const fileInput = document.getElementById('ragfordummies_file_input');
     if (uploadBtn && fileInput) {
@@ -1643,115 +1279,63 @@ function attachEventListeners() {
                 const content = await file.text();
                 const isTxt = /\.txt$/i.test(file.name);
                 const isJsonl = /\.jsonl$/i.test(file.name);
-                if (!isTxt && !isJsonl) throw new Error('Unsupported file type. Please upload .jsonl or .txt');
+                if (!isTxt && !isJsonl) throw new Error('Unsupported file type');
                 const shouldMerge = document.getElementById('ragfordummies_merge_uploads')?.checked;
-                let targetChatId, targetIsGroupChat;
-                if (shouldMerge) {
-                    targetChatId = getCurrentChatId();
-                    targetIsGroupChat = isCurrentChatGroupChat();
-                    if (!targetChatId) throw new Error('No active chat to merge into.');
-                    updateUI('status', 'Merging into current chat collection...');
-                } else {
-                    targetChatId = Date.now().toString();
-                    targetIsGroupChat = false;
-                }
+                let targetChatId = shouldMerge ? getCurrentChatId() : Date.now().toString();
                 const jsonlToIndex = isTxt ? convertTextToJSONL(content) : content;
-                if (!shouldMerge) {
-                    const parsed = parseJSONL(jsonlToIndex);
-                    if (parsed.chatMetadata?.chat_id_hash) targetChatId = parsed.chatMetadata.chat_id_hash;
-                }
-                await indexChat(jsonlToIndex, targetChatId, targetIsGroupChat);
+                if (!shouldMerge) { const parsed = parseJSONL(jsonlToIndex); if (parsed.chatMetadata?.chat_id_hash) targetChatId = parsed.chatMetadata.chat_id_hash; }
+                await indexChat(jsonlToIndex, targetChatId, shouldMerge ? isCurrentChatGroupChat() : false);
                 updateUI('status', shouldMerge ? '✓ Merged into current chat!' : '✓ Uploaded file indexed.');
-            } catch (error) {
-                updateUI('status', 'Upload failed: ' + error.message);
-            }
+            } catch (error) { updateUI('status', 'Upload failed: ' + error.message); }
             fileInput.value = '';
         });
     }
 }
 
-function saveSettings() {
-    localStorage.setItem(MODULE_NAME + '_settings', JSON.stringify(extensionSettings));
-}
-
+function saveSettings() { localStorage.setItem(MODULE_NAME + '_settings', JSON.stringify(extensionSettings)); }
 function loadSettings() {
     const saved = localStorage.getItem(MODULE_NAME + '_settings');
-    if (saved) {
-        try {
-            extensionSettings = { ...defaultSettings, ...JSON.parse(saved) };
-        } catch (error) {
-            console.error('[' + MODULE_NAME + '] Failed to load settings:', error);
-        }
-    }
+    if (saved) { try { extensionSettings = { ...defaultSettings, ...JSON.parse(saved) }; } catch (error) {} }
 }
-
-// ===========================
-// Extension Initialization
-// ===========================
 
 async function init() {
     loadSettings();
     if (pollingInterval) clearInterval(pollingInterval);
     pollingInterval = null;
+    injectTrackerCSS(); // INJECT CSS HERE
     
-    // Asynchronously load the compromise NLP library from a CDN
+    // Load NLP
     async function loadNlpLibrary() {
-        return new Promise((resolve, reject) => {
-            if (typeof window.nlp !== 'undefined') {
-                console.log('[' + MODULE_NAME + '] compromise NLP library already loaded.');
-                return resolve();
-            }
-            console.log('[' + MODULE_NAME + '] Loading compromise NLP library from CDN...');
+        return new Promise((resolve) => {
+            if (typeof window.nlp !== 'undefined') return resolve();
             const script = document.createElement('script');
             script.src = 'https://unpkg.com/compromise';
-            script.onload = () => {
-                console.log('[' + MODULE_NAME + '] compromise NLP library loaded successfully.');
-                resolve();
-            };
-            script.onerror = () => {
-                console.error('[' + MODULE_NAME + '] Failed to load compromise NLP library.');
-                updateUI('status', 'ERROR: NLP library failed to load. Keyword extraction will be limited.');
-                reject(new Error('NLP library failed to load'));
-            };
+            script.onload = resolve;
+            script.onerror = resolve; // degrade gracefully
             document.head.appendChild(script);
         });
     }
-
-    try {
-        await loadNlpLibrary();
-    } catch (error) {
-        // If the library fails to load, the extension can still run, but with degraded functionality.
-        // `extractKeywords` will see that `window.nlp` is undefined and will simply return an empty array.
-    }
+    await loadNlpLibrary();
     
     const settingsHtml = createSettingsUI();
     $('#extensions_settings').append(settingsHtml);
     
-    setTimeout(() => {
-        const toggle = $('#ragfordummies_container .inline-drawer-toggle');
-        if (toggle.length) {
-            toggle.on('click', function(e) {
-                e.preventDefault(); e.stopPropagation();
-                $(this).find('.inline-drawer-icon').toggleClass('down up');
-                $('#ragfordummies_container .inline-drawer-content').slideToggle(200);
-            });
-            // Nested Toggle for Tracker
-            $('#ragfordummies_container .inline-drawer .inline-drawer-toggle').on('click', function(e){
-                e.stopPropagation();
-                $(this).find('.inline-drawer-icon').toggleClass('down up');
-                $(this).next('.inline-drawer-content').slideToggle(200);
-            });
-        }
-    }, 200);
-    
+    // FIX UI BUBBLING
+    $('#ragfordummies_container > .inline-drawer-toggle').on('click', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        $(this).find('.inline-drawer-icon').toggleClass('down up');
+        $('#ragfordummies_container .inline-drawer-content').first().slideToggle(200);
+    });
+    $('#rag_tracker_drawer > .inline-drawer-toggle').on('click', function(e) {
+        e.preventDefault(); e.stopPropagation();
+        $(this).find('.inline-drawer-icon').toggleClass('down up');
+        $(this).next('.inline-drawer-content').slideToggle(200);
+    });
+
     attachEventListeners();
-    
-    let eventSourceToUse = null;
-    if (typeof eventSource !== 'undefined') eventSourceToUse = eventSource;
-    else if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext?.().eventSource) eventSourceToUse = SillyTavern.getContext().eventSource;
+    let eventSourceToUse = typeof eventSource !== 'undefined' ? eventSource : (typeof SillyTavern !== 'undefined' ? SillyTavern.getContext?.().eventSource : null);
 
     if (eventSourceToUse) {
-        console.log('[' + MODULE_NAME + '] Registering event listeners on eventSource');
         eventSourceToUse.on('chat_loaded', onChatLoaded);
         eventSourceToUse.on('message_sent', onMessageSent);
         eventSourceToUse.on('message_received', onMessageReceived);
@@ -1762,49 +1346,21 @@ async function init() {
             eventSourceToUse.on('GENERATION_AFTER_COMMANDS', (type) => injectContextWithSetExtensionPrompt(type));
             eventSourceToUse.on('generate_before_combine_prompts', () => injectContextWithSetExtensionPrompt('normal'));
         }
-
-        // --- NEW TRACKER LISTENERS ---
-        // 1. Prepare Prompt (Inject Instructions)
+        // Tracker Hooks
         eventSourceToUse.on(SillyTavern.event_types.TEXT_GENERATION_PROMPT_PREPARATION, tracker_onPromptGeneration);
-        // 2. Process Output (Read/Hide State)
         eventSourceToUse.on(SillyTavern.event_types.CHAT_COMPLETION_PROCESSED, tracker_onReplyProcessed);
-
         eventsRegistered = true;
-        console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
     } else {
-        console.log('[' + MODULE_NAME + '] eventSource not available, using polling fallback');
-        eventsRegistered = false;
         usePolling = true;
     }
-
-    // Always start polling if autoIndex is on
-    if (extensionSettings.autoIndex) {
-        await startPolling();
-    }
-
+    if (extensionSettings.autoIndex) await startPolling();
     setTimeout(async () => {
-        console.log('[' + MODULE_NAME + '] Running initial index status check...');
         const chatId = getCurrentChatId();
         if (chatId && !currentChatIndexed) {
-            const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
-            try {
-                const pointCount = await countPoints(collectionName);
-                if (pointCount > 0) {
-                    currentChatIndexed = true;
-                    updateUI('status', '✓ Indexed (' + pointCount + ' messages)');
-                } else {
-                    updateUI('status', 'Ready to index');
-                }
-            } catch (checkError) {
-                console.log('[' + MODULE_NAME + '] Initial check: Could not verify collection -', checkError.message);
-            }
+            try { if (await countPoints((isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId) > 0) currentChatIndexed = true; } catch (e) {}
         }
     }, 500);
-    
-    console.log('[' + MODULE_NAME + '] Extension loaded successfully');
     updateUI('status', 'Extension loaded');
 }
 
-jQuery(async function() {
-    setTimeout(init, 100);
-});
+jQuery(
