@@ -1518,12 +1518,17 @@ async function onMessageReceived(messageData) {
     if (!extensionSettings.enabled || !extensionSettings.autoIndex) return;
     const chatId = getCurrentChatId();
     if (!chatId) return;
+
     if (currentChatIndexed && typeof SillyTavern !== 'undefined') {
         try {
             const context = SillyTavern.getContext();
             if (context.chat && context.chat.length > 0) {
                 const messageIndex = context.chat.length - 1;
+
                 if (!indexedMessageIds.has(messageIndex)) {
+                    // Always use current state location for indexing QoL
+                    ft_stampAssistantLocationForIndexing(context.chat[messageIndex]);
+
                     await indexSingleMessage(context.chat[messageIndex], chatId, messageIndex, isCurrentChatGroupChat());
                     indexedMessageIds.add(messageIndex);
                     lastMessageCount = context.chat.length;
