@@ -1538,20 +1538,27 @@ async function onMessageSwiped(data) {
     if (!extensionSettings.enabled) return;
     const chatId = getCurrentChatId();
     if (!chatId) return;
+
     const collectionName = (isCurrentChatGroupChat() ? 'st_groupchat_' : 'st_chat_') + chatId;
     let targetIndex = (typeof data === 'number') ? data : (data && typeof data.index === 'number' ? data.index : null);
+
     (async () => {
         try {
             if (!currentChatIndexed && await countPoints(collectionName) === 0) return;
             currentChatIndexed = true;
+
             const context = await (async (idx, maxWaitMs = 2500) => {
                 const start = Date.now();
                 const readCtx = () => {
-                    const ctx = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext === 'function' ? getContext() : null);
+                    const ctx = typeof SillyTavern !== 'undefined'
+                        ? SillyTavern.getContext()
+                        : (typeof getContext === 'function' ? getContext() : null);
                     return { ctx, mes: (ctx?.chat?.[idx])?.mes || null };
                 };
+
                 const { mes: initial } = readCtx();
                 let lastSeen = initial, stableCount = 0;
+
                 while (Date.now() - start < maxWaitMs) {
                     await new Promise(res => setTimeout(res, 100));
                     const { ctx, mes } = readCtx();
@@ -1561,13 +1568,20 @@ async function onMessageSwiped(data) {
                 }
                 return readCtx().ctx;
             })(targetIndex !== null ? targetIndex : (SillyTavern.getContext()?.chat.length - 1 || 0));
+
             if (!context?.chat?.length) return;
             if (targetIndex === null || targetIndex < 0 || targetIndex >= context.chat.length) targetIndex = context.chat.length - 1;
+
             const message = context.chat[targetIndex];
             if (!message) return;
+
+            // Always use current state location for indexing QoL
+            ft_stampAssistantLocationForIndexing(message);
+
             await deleteMessageByIndex(collectionName, chatId, targetIndex);
             await indexSingleMessage(message, chatId, targetIndex, isCurrentChatGroupChat());
             indexedMessageIds.add(targetIndex);
+
             console.log('[' + MODULE_NAME + '] Swipe: re-indexed message ' + targetIndex);
         } catch (err) {
             console.error('[' + MODULE_NAME + '] Swipe reindex failed:', err);
