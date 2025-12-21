@@ -1,5 +1,5 @@
 /**
- * RagForDummies + FuckTracker Integration
+ * RagForDummies + FuckTracker Integration (Final Merged Version)
  * A RAG extension for SillyTavern that actually works + Zero Latency State Tracking
  */
 
@@ -14,9 +14,8 @@ const MODULE_LOG_WHITELIST = [
     'Initial check',
     'Tracker',
     'TRACKER',
-    'TRACKER DEBUG',
-    'JSON Parse',
-    'FUCKTRACKER'
+    'FUCKTRACKER',
+    'JSON Parse'
 ];
 
 // Allow detailed confirmations and hybrid search traces
@@ -147,25 +146,25 @@ function injectTrackerCSS() {
     if (document.getElementById(styleId)) return;
 
     const css = `
-        /* The Header Container */
+        /* The Header Container - Pushed to top of bubble using negative margins */
         .ft-inline-container {
             display: block;
-            width: 100%;
-            margin-bottom: 12px; /* Space between box and character text */
-            background-color: rgba(20, 20, 20, 0.5);
-            border: 1px solid var(--SmartThemeBorderColor);
-            border-radius: 8px;
+            margin: -10px -15px 15px -15px !important;
+            width: calc(100% + 30px);
+            background-color: rgba(20, 20, 20, 0.4);
+            border-bottom: 2px solid var(--SmartThemeBorderColor);
+            border-radius: 10px 10px 0 0;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 0.75em;
             overflow: hidden;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
         
         .ft-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
             gap: 1px;
-            background-color: rgba(255,255,255,0.05); /* Subtle grid lines */
+            background-color: rgba(255,255,255,0.1); /* Lines between cells */
         }
 
         .ft-cell {
@@ -184,7 +183,7 @@ function injectTrackerCSS() {
             text-transform: uppercase;
             font-weight: 700;
             font-size: 0.85em;
-            opacity: 0.5;
+            opacity: 0.6;
             margin-bottom: 2px;
             letter-spacing: 0.5px;
         }
