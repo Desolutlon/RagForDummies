@@ -1537,33 +1537,43 @@ Format:
 const tracker_onReplyProcessed = (data) => {
     if (!extensionSettings.trackerEnabled) return data;
     const rawMsg = data.text;
-    
-    const regex = /⦗([\s\S]*?)⦘/; 
+
+    // Updated regex to capture JSON block between ⦗ and ⦘
+    const regex = /⦗([\s\S]*?)⦘/;
     const match = rawMsg.match(regex);
-    
+
     if (match) {
         const jsonStr = match[1];
         try {
             const parsedData = JSON.parse(jsonStr);
             window.RagTrackerState.updateFromJSON(parsedData);
-            
+
             console.log(`[${MODULE_NAME}] [TRACKER] State Updated via JSON`);
-            
+
+            // Remove the JSON block from the message text
             data.text = rawMsg.replace(regex, "").trim();
-            
+
+            // If the AI didn't write anything after the block, add a note
             if (data.text.length === 0) {
                 data.text = "(AI failed to generate dialogue. Please regenerate.)";
             }
-            
+
+            // Generate and inject the tracker HTML if inline display is enabled
             if (extensionSettings.trackerInline) {
+                // Store the tracker HTML to be injected via DOM manipulation
+                // We'll use a setTimeout to ensure the message exists in the DOM first
                 setTimeout(() => {
                     injectTrackerDisplay(parsedData);
-                }, 100);
+                }, 100); // A short delay might be necessary
             }
         } catch (e) {
             console.error(`[${MODULE_NAME}] [TRACKER] Failed to parse JSON:`, e);
+            console.error(`[${MODULE_NAME}] [TRACKER] Offending String:`, jsonStr); // Log the bad string
+            // Fallback: Just remove the block if it failed to parse
             data.text = rawMsg.replace(regex, "").trim();
         }
+    } else {
+        console.log(`[${MODULE_NAME}] [TRACKER] No tracker block found in message.`);
     }
     return data;
 };
@@ -1572,7 +1582,8 @@ const tracker_onReplyProcessed = (data) => {
 function injectTrackerDisplay(trackerData) {
     const s = window.RagTrackerState;
     const renderArr = (arr) => arr.length ? arr.join(', ') : 'None';
-    
+
+    // Generate the tracker HTML
     const trackerHtml = `
 <div class="ft-tracker-display" data-tracker="true">
     <div class="ft-grid">
@@ -1598,38 +1609,51 @@ function injectTrackerDisplay(trackerData) {
     </div>
 </div>`;
 
+    // Find the most recent character message (not user message)
     const chatContainer = document.getElementById('chat');
     if (!chatContainer) {
-        console.warn('[' + MODULE_NAME + '] Could not find chat container');
+        console.warn('[' + MODULE_NAME + '] Could not find chat container for DOM injection.');
         return;
     }
-    
-    const messages = chatContainer.querySelectorAll('.mes');
-    if (messages.length === 0) return;
-    
-    let targetMessage = null;
+
+    // Get all message blocks that are direct children of the chat container
+    const messages = Array.from(chatContainer.children).filter(child => child.matches('.mes_block'));
+    if (messages.length === 0) {
+        console.warn('[' + MODULE_NAME + '] No message blocks found.');
+        return;
+    }
+
+    // Find the last non-user message block
+    let targetMessageBlock = null;
     for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        if (!msg.closest('.user_mes')) { // More reliable way to find character message
-            targetMessage = msg;
+        const block = messages[i];
+        if (!block.classList.contains('user_mes')) {
+            targetMessageBlock = block;
             break;
         }
     }
-    
-    if (!targetMessage) {
-        console.warn('[' + MODULE_NAME + '] Could not find target message for tracker display');
+
+    if (!targetMessageBlock) {
+        console.warn('[' + MODULE_NAME + '] Could not find target character message block.');
         return;
     }
-    
-    const existingTracker = targetMessage.querySelector('.ft-tracker-display');
+
+    const messageContent = targetMessageBlock.querySelector('.mes');
+    if (!messageContent) {
+        console.warn('[' + MODULE_NAME + '] Message content area (.mes) not found in block.');
+        return;
+    }
+
+    // Remove any existing tracker display from this message to prevent duplicates on edit/regen
+    const existingTracker = messageContent.querySelector('.ft-tracker-display');
     if (existingTracker) {
         existingTracker.remove();
     }
-    
-    targetMessage.insertAdjacentHTML('afterbegin', trackerHtml);
-    console.log('[' + MODULE_NAME + '] Tracker display injected successfully');
-}
 
+    // Insert the tracker HTML at the beginning of the message content area
+    messageContent.insertAdjacentHTML('afterbegin', trackerHtml);
+    console.log('[' + MODULE_NAME + '] Tracker display injected successfully into target message.');
+}
 
 // ===========================
 // UI Functions
