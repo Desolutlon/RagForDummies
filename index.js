@@ -1501,36 +1501,56 @@ const tracker_injectInstruction = () => {
 
     const contextDepth = extensionSettings.trackerContextDepth || 10;
     
+    // --- THE MEGA PROMPT (Updated to your specifics and fixed logic) ---
     const instruction = `
 \n[SYSTEM INSTRUCTION: FUCKTRACKER]
-Analyze the last ${contextDepth} messages. Determine the current world state.
-Output a valid JSON block enclosed in ⦗ and ⦘.
-Do NOT output conversational filler before the JSON block. Start immediately with ⦗.
+Analyze the last ${contextDepth} messages and the current scenario. You must output a hidden JSON block detailing the current state of the world and character.
 
-Format:
+Output Format:
+1. Start your response with \`⦗\`.
+2. Output a valid JSON block containing the fields below.
+3. Close the JSON block with \`⦘\`.
+4. CRITICAL: You must write the character's response/dialogue AFTER the JSON block. Do not output only the JSON.
+
+Example Structure:
 ⦗
 {
-  "Time": "HH:MM p.m; MM/DD/YYYY (DayName)",
-  "Tone": "Mood word",
-  "Topic": "Conversation topic",
-  "CharactersPresent": ["Nicknames"],
-  "Outfit": ["Item 1", "Item 2", "Item 3 (Underwear)"],
-  "StateOfDress": "Description of clothing condition (wrinkled, torn, etc).",
-  "CurrentAction": "Physical action description",
-  "Location": "Specific Place, City, State",
-  "Weather": "Temp C, Humidity, Wind",
-  "Cash": "Amount USD and location",
-  "Income": "Source and Amount",
-  "Intoxication": "Sober/Drunk level",
-  "HungerThirst": "Status",
-  "Excretion": "Biological urge status"
+  "Time": "4:30 p.m; 06/15/1929 (Saturday)",
+  "Tone": "Perfect",
+  "Topic": "Tense Negotiation",
+  "CharactersPresent": ["{{user}}", "Al Capone"],
+  "Outfit": ["Black pinstripe suit", "White fedora", "Gold watch"],
+  "StateOfDress": "Suit jacket unbuttoned, tie loosened slightly.",
+  "CurrentAction": "Sitting at desk, smoking a cigar",
+  "Location": "The Green Mill Lounge, Uptown, Chicago, Illinois",
+  "Weather": "22°C, 60% humidity, light wind. Overcast with threatening rain.",
+  "Cash": "500 USD in money clip in jacket pocket",
+  "Income": "Bootlegging operations, Weekly, 5000 USD",
+  "Intoxication": "Slightly buzzed",
+  "HungerThirst": "Not hungry, drinking whiskey",
+  "Excretion": "No urge"
 }
 ⦘
-[After the JSON block, write the character's response as normal.]
+*Al leans back in his chair, ash falling from his cigar.* "So, you think you can just walk in here?"
+
+Field Requirements:
+1. Time: Format as "HH:MM p.m; MM/DD/YYYY (DayName)".
+2. Topic: 1-2 words on primary nature/dynamic.
+3. CharactersPresent: Array of nicknames. Put {{user}} first if present. Only active participants.
+4. Outfit: Detailed list of clothing/accessories/undergarments. No status description here. If naked, state it.
+5. StateOfDress: Condition/arrangement (wrinkled, unbuttoned, damaged). If naked: "No clothing present".
+6. CurrentAction: Posture, interaction (e.g., "Standing at podium").
+7. Location: "Specific Place, Building, City, State".
+8. Weather: Scientific tone (Temp C, wind, clouds). Match time/environment.
+9. Cash: Amount (USD) and location (wallet/pocket). Infer realistic amount if unknown. No "Unknown".
+10. Income: Source, frequency, estimated amount. Single line.
+11. Intoxication: Logical level based on intake.
+12. HungerThirst: Logical level based on time since last meal.
+13. Excretion: Biological urge level (bladder/bowels) based on 24h cycle/intake.
 `;
 
     context.setExtensionPrompt('RagTracker', instruction, 1, 0, true);
-    console.log(`[${MODULE_NAME}] [TRACKER] System Instructions Injected.`);
+    console.log(`[${MODULE_NAME}] [TRACKER] System Instructions Injected via setExtensionPrompt.`);
 };
 
 
@@ -1557,102 +1577,126 @@ const tracker_onReplyProcessed = (data) => {
             if (data.text.length === 0) {
                 data.text = "(AI failed to generate dialogue. Please regenerate.)";
             }
-
-            // Generate and inject the tracker HTML if inline display is enabled
-            if (extensionSettings.trackerInline) {
-                // Store the tracker HTML to be injected via DOM manipulation
-                // We'll use a setTimeout to ensure the message exists in the DOM first
-                setTimeout(() => {
-                    injectTrackerDisplay(parsedData);
-                }, 100); // A short delay might be necessary
-            }
+            
         } catch (e) {
             console.error(`[${MODULE_NAME}] [TRACKER] Failed to parse JSON:`, e);
-            console.error(`[${MODULE_NAME}] [TRACKER] Offending String:`, jsonStr); // Log the bad string
+            console.error(`[${MODULE_NAME}] [TRACKER] Raw JSON string:`, jsonStr);
             // Fallback: Just remove the block if it failed to parse
             data.text = rawMsg.replace(regex, "").trim();
         }
-    } else {
-        console.log(`[${MODULE_NAME}] [TRACKER] No tracker block found in message.`);
     }
     return data;
 };
 
-// NEW FUNCTION: Inject tracker display above the latest message
-function injectTrackerDisplay(trackerData) {
-    const s = window.RagTrackerState;
-    const renderArr = (arr) => arr.length ? arr.join(', ') : 'None';
+// NEW: Handler for when a character message is rendered in the UI
+async function onCharacterMessageRendered(messageId) {
+    if (!extensionSettings.trackerEnabled || !extensionSettings.trackerInline) return;
+    
+    // Wait a bit for the message to fully render in DOM
+    await new Promise(resolve => setTimeout(resolve, 150));
+    
+    try {
+        // Find the message element by its unique ID
+        const messageBlock = document.querySelector(`.mes_block[mesid="${messageId}"]`);
+        if (!messageBlock) {
+            console.warn('[' + MODULE_NAME + '] Could not find message block with mesid=' + messageId);
+            return;
+        }
+        
+        // Check if it's a user message (skip those)
+        if (messageBlock.classList.contains('user_mes')) {
+            return;
+        }
+        
+        const messageContent = messageBlock.querySelector('.mes');
+        if (!messageContent) {
+            console.warn('[' + MODULE_NAME + '] Could not find .mes content area for message ' + messageId);
+            return;
+        }
 
-    // Generate the tracker HTML
-    const trackerHtml = `
+        // Check if tracker display already exists to avoid duplicates
+        if (messageContent.querySelector('.ft-tracker-display')) {
+            console.log('[' + MODULE_NAME + '] Tracker display already exists for message ' + messageId);
+            return;
+        }
+        
+        // Generate and inject the tracker HTML
+        const s = window.RagTrackerState;
+        const renderArr = (arr) => Array.isArray(arr) && arr.length ? arr.join(', ') : 'None';
+        
+        const trackerHtml = `
 <div class="ft-tracker-display" data-tracker="true">
     <div class="ft-grid">
         <div class="ft-cell full-width">
             <div class="ft-label">Time & Date</div>
             <div class="ft-val">${s.time}</div>
         </div>
+        
         <div class="ft-cell full-width">
             <div class="ft-label">Location</div>
             <div class="ft-val">${s.location}</div>
         </div>
-        <div class="ft-cell"><div class="ft-label">Weather</div><div class="ft-val">${s.weather}</div></div>
-        <div class="ft-cell"><div class="ft-label">Action</div><div class="ft-val">${s.action}</div></div>
-        <div class="ft-cell"><div class="ft-label">Topic</div><div class="ft-val">${s.topic}</div></div>
-        <div class="ft-cell"><div class="ft-label">Tone</div><div class="ft-val">${s.tone}</div></div>
-        <div class="ft-cell full-width"><div class="ft-label">Present</div><div class="ft-val">${renderArr(s.present)}</div></div>
-        <div class="ft-cell full-width"><div class="ft-label">Outfit</div><div class="ft-val" style="font-size:0.9em;">${renderArr(s.outfit)}</div></div>
-        <div class="ft-cell full-width"><div class="ft-label">State of Dress</div><div class="ft-val" style="font-style:italic;">${s.dressState}</div></div>
-        <div class="ft-cell"><div class="ft-label">Cash</div><div class="ft-val">${s.cash}</div></div>
-        <div class="ft-cell"><div class="ft-label">Income</div><div class="ft-val" style="font-size:0.8em;">${s.income}</div></div>
-        <div class="ft-cell"><div class="ft-label">Intoxication</div><div class="ft-val">${s.intoxication}</div></div>
-        <div class="ft-cell"><div class="ft-label">Needs</div><div class="ft-val" style="font-size:0.85em;">H/T: ${s.hunger}<br>Exc: ${s.excretion}</div></div>
+
+        <div class="ft-cell">
+            <div class="ft-label">Weather</div>
+            <div class="ft-val">${s.weather}</div>
+        </div>
+        <div class="ft-cell">
+            <div class="ft-label">Action</div>
+            <div class="ft-val">${s.action}</div>
+        </div>
+
+        <div class="ft-cell">
+            <div class="ft-label">Topic</div>
+            <div class="ft-val">${s.topic}</div>
+        </div>
+        <div class="ft-cell">
+            <div class="ft-label">Tone</div>
+            <div class="ft-val">${s.tone}</div>
+        </div>
+
+        <div class="ft-cell full-width">
+            <div class="ft-label">Present</div>
+            <div class="ft-val">${renderArr(s.present)}</div>
+        </div>
+
+        <div class="ft-cell full-width">
+            <div class="ft-label">Outfit</div>
+            <div class="ft-val" style="font-size:0.9em;">${renderArr(s.outfit)}</div>
+        </div>
+        
+        <div class="ft-cell full-width">
+            <div class="ft-label">State of Dress</div>
+            <div class="ft-val" style="font-style:italic;">${s.dressState}</div>
+        </div>
+
+        <div class="ft-cell">
+            <div class="ft-label">Cash</div>
+            <div class="ft-val">${s.cash}</div>
+        </div>
+        <div class="ft-cell">
+            <div class="ft-label">Income</div>
+            <div class="ft-val" style="font-size:0.8em;">${s.income}</div>
+        </div>
+
+        <div class="ft-cell">
+            <div class="ft-label">Intoxication</div>
+            <div class="ft-val">${s.intoxication}</div>
+        </div>
+        <div class="ft-cell">
+            <div class="ft-label">Needs</div>
+            <div class="ft-val" style="font-size:0.85em;">H/T: ${s.hunger}<br>Exc: ${s.excretion}</div>
+        </div>
     </div>
 </div>`;
-
-    // Find the most recent character message (not user message)
-    const chatContainer = document.getElementById('chat');
-    if (!chatContainer) {
-        console.warn('[' + MODULE_NAME + '] Could not find chat container for DOM injection.');
-        return;
+        
+        // Insert at the beginning of the message content
+        messageContent.insertAdjacentHTML('afterbegin', trackerHtml);
+        console.log('[' + MODULE_NAME + '] Tracker display injected for message ' + messageId);
+        
+    } catch (error) {
+        console.error('[' + MODULE_NAME + '] Error injecting tracker display:', error);
     }
-
-    // Get all message blocks that are direct children of the chat container
-    const messages = Array.from(chatContainer.children).filter(child => child.matches('.mes_block'));
-    if (messages.length === 0) {
-        console.warn('[' + MODULE_NAME + '] No message blocks found.');
-        return;
-    }
-
-    // Find the last non-user message block
-    let targetMessageBlock = null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const block = messages[i];
-        if (!block.classList.contains('user_mes')) {
-            targetMessageBlock = block;
-            break;
-        }
-    }
-
-    if (!targetMessageBlock) {
-        console.warn('[' + MODULE_NAME + '] Could not find target character message block.');
-        return;
-    }
-
-    const messageContent = targetMessageBlock.querySelector('.mes');
-    if (!messageContent) {
-        console.warn('[' + MODULE_NAME + '] Message content area (.mes) not found in block.');
-        return;
-    }
-
-    // Remove any existing tracker display from this message to prevent duplicates on edit/regen
-    const existingTracker = messageContent.querySelector('.ft-tracker-display');
-    if (existingTracker) {
-        existingTracker.remove();
-    }
-
-    // Insert the tracker HTML at the beginning of the message content area
-    messageContent.insertAdjacentHTML('afterbegin', trackerHtml);
-    console.log('[' + MODULE_NAME + '] Tracker display injected successfully into target message.');
 }
 
 // ===========================
@@ -1919,6 +1963,10 @@ async function init() {
         
         // --- TRACKER OUTPUT PARSING ---
         eventSourceToUse.on('chat_completion_processed', tracker_onReplyProcessed);
+        
+        // --- NEW: DOM INJECTION HOOK ---
+        eventSourceToUse.on('character_message_rendered', onCharacterMessageRendered);
+
 
         eventsRegistered = true;
         console.log('[' + MODULE_NAME + '] Event listeners registered successfully');
