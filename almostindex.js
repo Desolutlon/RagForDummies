@@ -1891,12 +1891,10 @@ function ft_buildTrackerHtmlFromSnapshot(snapshot) {
 </div>`;
 }
 
-// DOM injection hook
 async function onCharacterMessageRendered(eventArg) {
     if (!extensionSettings.trackerEnabled || !extensionSettings.trackerInline) return;
 
-    const mesId = ft_getMesIdFromEventArg(eventArg);
-    if (mesId == null) return;
+    let mesId = ft_getMesIdFromEventArg(eventArg);
 
     const maxWaitMs = 2500;
     const start = Date.now();
@@ -1904,8 +1902,25 @@ async function onCharacterMessageRendered(eventArg) {
     let mesEl = null;
     let mesTextEl = null;
 
+    // Fallback: if mesId is not provided by your ST build, target the last assistant message element
+    const findFallbackLastAssistantMes = () => {
+        const all = Array.from(document.querySelectorAll('#chat .mes'));
+        for (let i = all.length - 1; i >= 0; i--) {
+            const el = all[i];
+            if (!el) continue;
+            if (el.classList.contains('user_mes')) continue;
+            return el;
+        }
+        return null;
+    };
+
     while (Date.now() - start < maxWaitMs) {
-        mesEl = ft_findMesElementByMesId(mesId);
+        if (mesId != null) {
+            mesEl = ft_findMesElementByMesId(mesId);
+        } else {
+            mesEl = findFallbackLastAssistantMes();
+        }
+
         if (mesEl) {
             if (mesEl.classList.contains('user_mes')) return;
             mesTextEl = mesEl.querySelector('.mes_text');
@@ -1915,25 +1930,34 @@ async function onCharacterMessageRendered(eventArg) {
     }
 
     if (!mesEl || !mesTextEl) {
-        console.warn(`[${MODULE_NAME}] [FUCKTRACKER] Could not resolve DOM for mesid=${mesId}`, { eventArg });
+        console.warn(`[${MODULE_NAME}] [FUCKTRACKER] Could not resolve DOM for rendered message`, { eventArg, mesId });
         return;
     }
 
     if (mesEl.querySelector('.ft-tracker-display')) return;
 
-    const key = String(mesId);
-    let snapshot = window.FuckTrackerSnapshots.byMesId[key];
-    if (!snapshot && window.FuckTrackerSnapshots.pending.length) {
-        snapshot = window.FuckTrackerSnapshots.pending.shift();
-        window.FuckTrackerSnapshots.byMesId[key] = snapshot;
+    // If the tracker block is still visible in the message text, remove it from the rendered DOM
+    ft_stripLeadingTrackerBlockFromMesTextEl(mesTextEl);
+
+    let snapshot = null;
+    if (mesId != null) {
+        const key = String(mesId);
+        snapshot = window.FuckTrackerSnapshots.byMesId[key];
+        if (!snapshot && window.FuckTrackerSnapshots.pending.length) {
+            snapshot = window.FuckTrackerSnapshots.pending.shift();
+            window.FuckTrackerSnapshots.byMesId[key] = snapshot;
+        }
+    } else {
+        if (window.FuckTrackerSnapshots.pending.length) {
+            snapshot = window.FuckTrackerSnapshots.pending.shift();
+        }
     }
 
     const trackerHtml = ft_buildTrackerHtmlFromSnapshot(snapshot);
 
-    // ✅ insert ABOVE dialogue (.mes_text) as separate block
     mesTextEl.insertAdjacentHTML('beforebegin', trackerHtml);
 
-    console.log(`[${MODULE_NAME}] [FUCKTRACKER] Injected tracker header for mesid=${mesId}`);
+    console.log(`[${MODULE_NAME}] [FUCKTRACKER] Injected tracker header`, { mesId });
 }
 
 // ===========================
