@@ -201,6 +201,53 @@ function ft_findMesElementByMesId(mesId) {
         || document.querySelector(`.mes[mesid="${CSS.escape(id)}"]`);
 }
 
+function ft_ensureMessageTrackerLocation(message, locationStr) {
+    if (!message || typeof locationStr !== 'string') return;
+    const loc = locationStr.trim();
+    if (!loc) return;
+
+    const nameKey = message.name || message.character || 'Unknown';
+
+    message.tracker = message.tracker || {};
+    message.tracker.Characters = message.tracker.Characters || {};
+    message.tracker.Characters[nameKey] = message.tracker.Characters[nameKey] || {};
+    message.tracker.Characters[nameKey].Location = loc;
+}
+
+function ft_stampAssistantLocationForIndexing(message) {
+    if (!extensionSettings.trackerEnabled) return;
+    if (!message || message.is_system) return;
+    if (message.is_user) return;
+
+    const loc = window.RagTrackerState?.location;
+    if (!loc || typeof loc !== 'string') return;
+
+    const trimmed = loc.trim();
+    if (!trimmed || trimmed === 'Unknown') return;
+
+    ft_ensureMessageTrackerLocation(message, trimmed);
+}
+
+function ft_stripLeadingTrackerBlockFromMesTextEl(mesTextEl) {
+    if (!mesTextEl) return false;
+
+    const re = /^\s*⦗[\s\S]*?⦘\s*/;
+
+    const html = mesTextEl.innerHTML;
+    if (re.test(html)) {
+        mesTextEl.innerHTML = html.replace(re, '').trim();
+        return true;
+    }
+
+    const txt = mesTextEl.textContent;
+    if (re.test(txt)) {
+        mesTextEl.textContent = txt.replace(re, '').trim();
+        return true;
+    }
+
+    return false;
+}
+
 // Extension settings with defaults
 const defaultSettings = {
     enabled: true,
@@ -473,7 +520,8 @@ const keywordBlacklist = new Set([
     'work', 'home', 'end', 'man', 'men', 'woman', 'women', 'child', 'children', 'people', 'person', 'family', 'friend', 'friends', 'sealed', 'unsealed', 'suddenly',
     'quickly', 'slowly', 'gently', 'softly', 'quietly', 'loudly', 'smiles', 'smiling', 'smiled', 'laughs', 'laughing', 'laughed', 'sighs', 'sighing', 'sighed',
     'nods', 'nodding', 'nodded', 'shakes', 'shaking', 'shook', 'looks', 'looking', 'walks', 'walking', 'turns', 'turning', 'turned', 'stands', 'standing',
-    'stood', 'sits', 'sitting', 'sat', 'grins', 'grinning', 'grinned', 'chuckles', 'chuckling', 'chuckled', 'giggles', 'giggling', 'giggled', 'pauses', 'pausing',
+    'stood', 'sits', 'sitting', 'sat', 'grins', 'grinning', 'grinned', 'chuckles', 'chuckling', 'chuckled', 'giggles', 'giggling',
+    'giggled', 'pauses', 'pausing',
     'paused', 'thinks', 'thinking', 'feels', 'feeling', 'felt', 'takes', 'taking', 'gives', 'giving', 'puts', 'putting', 'gets', 'getting', 'moves', 'moving',
     'moved', 'steps', 'stepping', 'stepped', 'reaches', 'reaching', 'reached', 'pulls', 'pulling', 'pulled', 'pushes', 'pushing', 'pushed', 'holds', 'holding',
     'held', 'starts', 'starting', 'started', 'stops', 'stopping', 'stopped', 'tries', 'trying', 'tried', 'says', 'saying', 'asks', 'asking', 'asked', 'tells',
@@ -838,7 +886,6 @@ async function deleteMessageByIndex(collectionName, chatIdHash, messageIndex) {
         console.warn('[' + MODULE_NAME + '] Delete (by message_index) failed:', err.message);
     }
 }
-
 async function searchVectors(collectionName, vector, limit, scoreThreshold, properNouns, maxIndex) {
     if (limit === undefined || limit === null) limit = extensionSettings.retrievalCount || 5;
     if (scoreThreshold === undefined) scoreThreshold = extensionSettings.similarityThreshold || 0.7;
@@ -1094,7 +1141,6 @@ function extractPayload(message, messageIndex, chatIdHash, participantNames) {
 
     const allKeywords = new Set([...properNounCandidates, ...commonKeywordCandidates]);
 
-    // 
     const trackerTopic =
         (tracker.Topics && tracker.Topics.PrimaryTopic) ||
         (tracker.Topic) ||
@@ -1192,7 +1238,6 @@ function constructMultiMessageQuery(context, generationType) {
 
     let query = collectedText.join('\n');
 
-    // 
     if (extensionSettings.trackerEnabled) {
         const t = window.RagTrackerState;
         if (t && typeof t.topic === 'string' && t.topic.trim()) {
@@ -1203,7 +1248,6 @@ function constructMultiMessageQuery(context, generationType) {
 
     return query;
 }
-
 async function indexChat(jsonlContent, chatIdHash, isGroupChat = false) {
     if (isIndexing) {
         console.log('[' + MODULE_NAME + '] Already indexing, please wait...');
@@ -1335,8 +1379,7 @@ async function retrieveContext(query, chatIdHash, isGroupChat = false) {
         const textForKeywords = sanitizeTextForKeywords(query, participantNames);
         const queryFilterTerms = extractQueryFilterTerms(textForKeywords, participantNames);
 
-        // 
-        // This preserves your existing query behavior but guarantees Topic participates in hybrid filtering.
+        // Topic participates in hybrid filtering
         const topicTerms = extractTopicTerms(window.RagTrackerState?.topic, participantNames);
         const merged = new Set(queryFilterTerms);
         topicTerms.forEach(t => merged.add(t));
@@ -1524,6 +1567,7 @@ async function onMessageReceived(messageData) {
             if (context.chat && context.chat.length > 0) {
                 const messageIndex = context.chat.length - 1;
                 if (!indexedMessageIds.has(messageIndex)) {
+                    ft_stampAssistantLocationForIndexing(context.chat[messageIndex]);
                     await indexSingleMessage(context.chat[messageIndex], chatId, messageIndex, isCurrentChatGroupChat());
                     indexedMessageIds.add(messageIndex);
                     lastMessageCount = context.chat.length;
@@ -1565,6 +1609,9 @@ async function onMessageSwiped(data) {
             if (targetIndex === null || targetIndex < 0 || targetIndex >= context.chat.length) targetIndex = context.chat.length - 1;
             const message = context.chat[targetIndex];
             if (!message) return;
+
+            ft_stampAssistantLocationForIndexing(message);
+
             await deleteMessageByIndex(collectionName, chatId, targetIndex);
             await indexSingleMessage(message, chatId, targetIndex, isCurrentChatGroupChat());
             indexedMessageIds.add(targetIndex);
@@ -1604,6 +1651,9 @@ async function onMessageEdited(data) {
         else if (typeof getContext === 'function') context = getContext();
         if (!context?.chat?.[messageIndex]) return;
         const message = context.chat[messageIndex];
+
+        ft_stampAssistantLocationForIndexing(message);
+
         await deleteMessageByIndex(collectionName, chatId, messageIndex);
         await indexSingleMessage(message, chatId, messageIndex, isCurrentChatGroupChat());
         console.log('[' + MODULE_NAME + '] Edit: re-indexed message ' + messageIndex);
@@ -1638,6 +1688,7 @@ async function startPolling() {
             if (!eventsRegistered) {
                 if (context.chat.length > lastMessageCount) {
                     for (let i = lastMessageCount; i < context.chat.length; i++) {
+                        ft_stampAssistantLocationForIndexing(context.chat[i]);
                         await indexSingleMessage(context.chat[i], chatId, i, isGroupChat);
                         indexedMessageIds.add(i);
                     }
@@ -1657,6 +1708,9 @@ async function startPolling() {
                     updateUI('status', '↻ Syncing summary for msg #' + i);
                     lastKnownSummaries.set(i, currentSum);
                     const collectionName = (isGroupChat ? 'st_groupchat_' : 'st_chat_') + chatId;
+
+                    ft_stampAssistantLocationForIndexing(msg);
+
                     await deleteMessageByIndex(collectionName, chatId, i);
                     await indexSingleMessage(msg, chatId, i, isGroupChat);
 
@@ -1677,7 +1731,6 @@ async function startPolling() {
         }
     }, 3000);
 }
-
 async function injectContextWithSetExtensionPrompt(generationType) {
     if (!extensionSettings.enabled || !extensionSettings.injectContext) return;
     const chatId = getCurrentChatId();
@@ -1842,7 +1895,7 @@ const tracker_onReplyProcessed = (data) => {
         }
     }
 
-    // advance clock per assistant message (as requested)
+    // advance clock per assistant message
     window.RagTrackerState.advanceClock();
     tracker_updateSettingsDebug();
 
@@ -1873,9 +1926,8 @@ function ft_buildTrackerHtmlFromSnapshot(snapshot) {
         return ft_renderValue(fields[title]);
     };
 
-    // mix: first three full width; rest can be half width if you want later
     const cells = titles.map((title, idx) => {
-        const full = (idx < 3) ? 'full-width' : 'full-width'; // keep full-width for readability
+        const full = (idx < 3) ? 'full-width' : 'full-width';
         return `
         <div class="ft-cell ${full}">
             <div class="ft-label">${ft_escapeHtml(title)}</div>
@@ -1921,6 +1973,8 @@ async function onCharacterMessageRendered(eventArg) {
 
     if (mesEl.querySelector('.ft-tracker-display')) return;
 
+    ft_stripLeadingTrackerBlockFromMesTextEl(mesTextEl);
+
     const key = String(mesId);
     let snapshot = window.FuckTrackerSnapshots.byMesId[key];
     if (!snapshot && window.FuckTrackerSnapshots.pending.length) {
@@ -1930,7 +1984,7 @@ async function onCharacterMessageRendered(eventArg) {
 
     const trackerHtml = ft_buildTrackerHtmlFromSnapshot(snapshot);
 
-    // ✅ insert ABOVE dialogue (.mes_text) as separate block
+    // insert above dialogue
     mesTextEl.insertAdjacentHTML('beforebegin', trackerHtml);
 
     console.log(`[${MODULE_NAME}] [FUCKTRACKER] Injected tracker header for mesid=${mesId}`);
@@ -1964,7 +2018,6 @@ function createSettingsUI() {
                 <div class="ragfordummies-settings">
                     <div class="ragfordummies-section"><label class="checkbox_label"><input type="checkbox" id="ragfordummies_enabled" ${extensionSettings.enabled ? 'checked' : ''} />Enable RAG</label></div>
 
-                    <!-- FUCK TRACKER SECTION -->
                     <div class="ragfordummies-section">
                         <div id="rag_tracker_drawer" class="inline-drawer">
                             <div class="inline-drawer-toggle inline-drawer-header"><b>Fuck Tracker</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down"></div></div>
@@ -1995,7 +2048,6 @@ function createSettingsUI() {
                             </div>
                         </div>
                     </div>
-                    <!-- END TRACKER -->
 
                     <div class="ragfordummies-section"><h4>Qdrant Configuration</h4><label><span>Local URL:</span><input type="text" id="ragfordummies_qdrant_local_url" value="${extensionSettings.qdrantLocalUrl}" placeholder="http://localhost:6333" /></label></div>
                     <div class="ragfordummies-section"><h4>Embedding Provider</h4><label><span>Provider:</span><select id="ragfordummies_embedding_provider"><option value="kobold" ${extensionSettings.embeddingProvider === 'kobold' ? 'selected' : ''}>KoboldCpp</option><option value="ollama" ${extensionSettings.embeddingProvider === 'ollama' ? 'selected' : ''}>Ollama</option><option value="openai" ${extensionSettings.embeddingProvider === 'openai' ? 'selected' : ''}>OpenAI</option></select></label><label id="ragfordummies_kobold_settings" style="${extensionSettings.embeddingProvider === 'kobold' ? '' : 'display:none'}"><span>KoboldCpp URL:</span><input type="text" id="ragfordummies_kobold_url" value="${extensionSettings.koboldUrl}" placeholder="http://localhost:11434" /></label><div id="ragfordummies_ollama_settings" style="${extensionSettings.embeddingProvider === 'ollama' ? '' : 'display:none'}"><label><span>Ollama URL:</span><input type="text" id="ragfordummies_ollama_url" value="${extensionSettings.ollamaUrl}" placeholder="http://localhost:11434" /></label><label><span>Ollama Model:</span><input type="text" id="ragfordummies_ollama_model" value="${extensionSettings.ollamaModel}" placeholder="nomic-embed-text" /></label></div><div id="ragfordummies_openai_settings" style="${extensionSettings.embeddingProvider === 'openai' ? '' : 'display:none'}"><label><span>OpenAI API Key:</span><input type="password" id="ragfordummies_openai_api_key" value="${extensionSettings.openaiApiKey}" placeholder="sk-..." /></label><label><span>OpenAI Model:</span><input type="text" id="ragfordummies_openai_model" value="${extensionSettings.openaiModel}" placeholder="text-embedding-3-small" /></label></div></div>
@@ -2015,7 +2067,6 @@ function attachEventListeners() {
         'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index',
         'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
         'max_token_budget',
-        // Tracker settings
         'tracker_enabled', 'tracker_time_step', 'tracker_inline', 'tracker_start_date', 'tracker_context_depth'
     ];
     settingIds.forEach(id => {
@@ -2111,7 +2162,6 @@ function attachEventListeners() {
         });
     }
 
-    // Tracker fields UI wiring
     ft_ensureRequiredFields();
     ft_renderFieldsUI();
 
@@ -2216,7 +2266,6 @@ async function init() {
     try {
         await loadNlpLibrary();
     } catch (error) {
-        // degrade gracefully
     }
 
     const settingsHtml = createSettingsUI();
@@ -2250,8 +2299,8 @@ async function init() {
 
         if (typeof injectContextWithSetExtensionPrompt === 'function') {
             const injectionHandler = (type) => {
-                injectContextWithSetExtensionPrompt(type || 'normal'); // RAG
-                tracker_injectInstruction();                           // TRACKER
+                injectContextWithSetExtensionPrompt(type || 'normal');
+                tracker_injectInstruction();
             };
             eventSourceToUse.on('GENERATION_AFTER_COMMANDS', injectionHandler);
             eventSourceToUse.on('generate_before_combine_prompts', () => injectionHandler('normal'));
