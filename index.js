@@ -2118,33 +2118,49 @@ function createSettingsUI() {
     return html;
 }
 
-function attachEventListeners() {
-    const settingIds = [
-        'enabled', 'qdrant_local_url', 'embedding_provider', 'kobold_url', 'ollama_url', 'ollama_model',
-        'openai_api_key', 'openai_model', 'retrieval_count', 'similarity_threshold', 'query_message_count', 'auto_index',
-        'inject_context', 'injection_position', 'inject_after_messages', 'exclude_last_messages', 'user_blacklist',
-        'max_token_budget',
-        // Tracker settings
-        'tracker_enabled', 'tracker_time_step', 'tracker_inline', 'tracker_start_date', 'tracker_context_depth'
-    ];
-    settingIds.forEach(id => {
-        const element = document.getElementById('ragfordummies_' + id);
-        if (element) {
-            element.addEventListener('change', () => {
-                const key = id.replace(/_([a-z])/g, (m, l) => l.toUpperCase());
-                if (element.type === 'checkbox') extensionSettings[key] = element.checked;
-                else if (element.type === 'number') extensionSettings[key] = parseFloat(element.value) || 0;
-                else extensionSettings[key] = element.value;
+// Manual value edits (always allowed)
+document.getElementById('ft_fields_container')?.addEventListener('input', (e) => {
+    const t = e.target;
+    if (!t) return;
 
-                if (id === 'auto_index') {
-                    if (element.checked && !pollingInterval) startPolling();
-                    else if (!element.checked && pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
-                }
-                if (id === 'tracker_start_date') tracker_initDate();
-                saveSettings();
-            });
-        }
-    });
+    const idx = Number(t.getAttribute('data-idx'));
+    if (!Number.isFinite(idx)) return;
+
+    const fields = extensionSettings.trackerFields;
+    if (!Array.isArray(fields) || !fields[idx]) return;
+
+    // existing title/prompt/examples logic you already have...
+    if (!fields[idx].locked) {
+        if (t.classList.contains('ft-field-title')) fields[idx].title = t.value;
+        if (t.classList.contains('ft-field-prompt')) fields[idx].prompt = t.value;
+        if (t.classList.contains('ft-field-examples')) fields[idx].examples = t.value;
+        saveSettings();
+    }
+
+    // NEW: value edits (allowed even if locked)
+    if (t.classList.contains('ft-field-value')) {
+        const title = fields[idx].title;
+        ft_setStateValueByTitle(title, t.value);
+    }
+
+    // Keep time preview fresh
+    const prev = document.getElementById('ft_time_preview');
+    if (prev) prev.textContent = window.RagTrackerState.time || 'Unknown';
+});
+
+// Manual time set button
+document.getElementById('ft_manual_time_apply')?.addEventListener('click', () => {
+    const inp = document.getElementById('ft_manual_time');
+    if (!inp) return;
+
+    const ms = ft_parseDatetimeLocalToMs(inp.value);
+    if (ms == null) return;
+
+    ft_setClockMs(ms);
+
+    const prev = document.getElementById('ft_time_preview');
+    if (prev) prev.textContent = window.RagTrackerState.time || 'Unknown';
+});
 
     document.getElementById('ragfordummies_embedding_provider')?.addEventListener('change', function() {
         const provider = this.value;
