@@ -471,19 +471,31 @@ function ft_renderFieldsUI() {
         const examples = f?.examples ?? '';
         const locked = !!f?.locked;
 
+        // current value comes from state (value is always editable)
+        let currentVal = '';
+        if (title === 'Location') currentVal = window.RagTrackerState.location ?? '';
+        else if (title === 'Topic') currentVal = window.RagTrackerState.topic ?? '';
+        else if (title === 'Tone') currentVal = window.RagTrackerState.tone ?? '';
+        else currentVal = window.RagTrackerState.fields?.[title] ?? '';
+
         const row = document.createElement('div');
         row.className = 'ft-field-row';
-        row.style.cssText = 'display:grid; grid-template-columns: 1fr 2fr 2fr auto; gap:6px; margin-bottom:6px; align-items:start;';
+        row.style.cssText = 'display:grid; grid-template-columns: 1fr 2fr 2fr 1fr auto; gap:6px; margin-bottom:6px; align-items:start;';
 
         row.innerHTML = `
           <input class="text_pole ft-field-title" data-idx="${idx}" placeholder="Title (e.g., Mood)" value="${ft_escapeHtml(title)}" ${locked ? 'disabled' : ''} />
           <textarea class="text_pole ft-field-prompt" data-idx="${idx}" rows="2" placeholder="Prompt for this field" ${locked ? 'disabled' : ''}>${ft_escapeHtml(prompt)}</textarea>
           <textarea class="text_pole ft-field-examples" data-idx="${idx}" rows="2" placeholder='Examples (e.g., ["Working Out"])' ${locked ? 'disabled' : ''}>${ft_escapeHtml(examples)}</textarea>
+          <input class="text_pole ft-field-value" data-idx="${idx}" placeholder="Manual value" value="${ft_escapeHtml(currentVal)}" />
           <button class="menu_button ft-field-remove" data-idx="${idx}" style="padding:4px 8px; font-size:0.85em;" ${locked ? 'disabled' : ''}>X</button>
         `;
 
         container.appendChild(row);
     });
+
+    // Update time preview
+    const prev = document.getElementById('ft_time_preview');
+    if (prev) prev.textContent = window.RagTrackerState.time || 'Unknown';
 }
 
 // ===========================
