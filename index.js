@@ -386,6 +386,57 @@ function ft_ensureRequiredFields() {
             required: true,
         });
     }
+    function ft_getTextAccessor(obj) {
+    // Returns { get():string, set(v:string) } for whatever field ST used
+    if (!obj || typeof obj !== 'object') return null;
+
+    if (typeof obj.text === 'string') return { get: () => obj.text, set: (v) => { obj.text = v; } };
+    if (typeof obj.mes === 'string') return { get: () => obj.mes, set: (v) => { obj.mes = v; } };
+    if (typeof obj.message === 'string') return { get: () => obj.message, set: (v) => { obj.message = v; } };
+
+    if (obj.message && typeof obj.message === 'object') {
+        if (typeof obj.message.text === 'string') return { get: () => obj.message.text, set: (v) => { obj.message.text = v; } };
+        if (typeof obj.message.mes === 'string') return { get: () => obj.message.mes, set: (v) => { obj.message.mes = v; } };
+        if (typeof obj.message.content === 'string') return { get: () => obj.message.content, set: (v) => { obj.message.content = v; } };
+    }
+
+    if (typeof obj.content === 'string') return { get: () => obj.content, set: (v) => { obj.content = v; } };
+    return null;
+}
+
+function ft_setClockMs(ms) {
+    if (!Number.isFinite(ms)) return;
+    window.RagTrackerState._clockMs = ms;
+    window.RagTrackerState.time = window.RagTrackerState.formatClock(ms);
+    tracker_updateSettingsDebug();
+}
+
+function ft_parseDatetimeLocalToMs(v) {
+    // datetime-local yields "YYYY-MM-DDTHH:MM"
+    if (!v || typeof v !== 'string') return null;
+    const ms = Date.parse(v);
+    return Number.isFinite(ms) ? ms : null;
+}
+
+function ft_setStateValueByTitle(title, value) {
+    const t = String(title || '').trim();
+    if (!t) return;
+
+    if (t === 'Location') {
+        window.RagTrackerState.location = String(value ?? '').trim() || 'Unknown';
+    } else if (t === 'Topic') {
+        window.RagTrackerState.topic = String(value ?? '').trim() || 'None';
+    } else if (t === 'Tone') {
+        window.RagTrackerState.tone = String(value ?? '').trim() || 'Neutral';
+        window.RagTrackerState.fields['Tone'] = window.RagTrackerState.tone;
+    } else if (t === 'Time & Date') {
+        // ignore here; time is set via the datetime-local control
+    } else {
+        window.RagTrackerState.fields[t] = value;
+    }
+
+    tracker_updateSettingsDebug();
+}
     if (!hasTopic) {
         fields.splice(1, 0, {
             title: "Topic",
