@@ -1965,28 +1965,74 @@ async function onCharacterMessageRendered(eventArg) {
         await new Promise(r => setTimeout(r, 50));
     }
 
-    if (!mesEl || !mesTextEl) {
-        console.warn(`[${MODULE_NAME}] [FUCKTRACKER] Could not resolve DOM for mesid=${mesId}`, { eventArg });
-        return;
-    }
+    if (!mesEl || !mesTextEl) return;
 
+    // Don't duplicate header
     if (mesEl.querySelector('.ft-tracker-display')) return;
 
     const key = String(mesId);
+
+    // 1) Prefer snapshot created by processed hook
     let snapshot = window.FuckTrackerSnapshots.byMesId[key];
+
+    // 2) If no snapshot, try the pending queue (rare)
     if (!snapshot && window.FuckTrackerSnapshots.pending.length) {
         snapshot = window.FuckTrackerSnapshots.pending.shift();
         window.FuckTrackerSnapshots.byMesId[key] = snapshot;
     }
 
+    // 3) If STILL no snapshot, parse JSON directly from the DOM message and strip it
+    // This fixes your current issue: JSON still visible and box empty.
+    if (!snapshot) {
+        const regex = /⦗([\s\S]*?)⦘/;
+        const html = mesTextEl.innerHTML;
+        const match = html.match(regex);
+
+        if (match) {
+            const jsonStr = match[1];
+
+            // Ensure clock initialized
+            if (!Number.isFinite(window.RagTrackerState._clockMs)) {
+                window.RagTrackerState.initClockFromSettingsAndChat();
+            }
+            const messageTime = window.RagTrackerState.formatClock(window.RagTrackerState._clockMs);
+
+            try {
+                const parsedData = JSON.parse(jsonStr);
+
+                window.RagTrackerState.updateFromJSON(parsedData);
+
+                snapshot = {
+                    time: messageTime,
+                    location: window.RagTrackerState.location,
+                    topic: window.RagTrackerState.topic,
+                    fields: { ...(window.RagTrackerState.fields || {}) },
+                };
+
+                window.FuckTrackerSnapshots.byMesId[key] = snapshot;
+
+                console.log(`[${MODULE_NAME}] [FUCKTRACKER] Snapshot stored (DOM fallback) for mesid=${key}`);
+            } catch (e) {
+                console.error(`[${MODULE_NAME}] [FUCKTRACKER] DOM fallback JSON parse failed:`, e);
+            }
+
+            // Strip JSON block from the rendered message HTML so it stops showing in chat
+            mesTextEl.innerHTML = html.replace(regex, '').trim();
+
+            // Advance clock per assistant message (DOM fallback path)
+            window.RagTrackerState.advanceClock();
+            tracker_updateSettingsDebug();
+        }
+    }
+
+    // 4) Build header from snapshot if we have it; else from current state
     const trackerHtml = ft_buildTrackerHtmlFromSnapshot(snapshot);
 
-    // ✅ insert ABOVE dialogue (.mes_text) as separate block
+    // Insert ABOVE dialogue as separate block
     mesTextEl.insertAdjacentHTML('beforebegin', trackerHtml);
 
     console.log(`[${MODULE_NAME}] [FUCKTRACKER] Injected tracker header for mesid=${mesId}`);
 }
-
 // ===========================
 // UI Functions
 // ===========================
