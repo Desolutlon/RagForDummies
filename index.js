@@ -1846,13 +1846,17 @@ const tracker_injectInstruction = () => {
 
 const tracker_onReplyProcessed = (data) => {
     if (!extensionSettings.trackerEnabled) return data;
-    if (!data || typeof data.text !== 'string') return data;
 
-    const rawMsg = data.text;
+    const acc = ft_getTextAccessor(data);
+    if (!acc) return data;
+
+    const rawMsg = acc.get();
+    if (typeof rawMsg !== 'string') return data;
+
     const regex = /⦗([\s\S]*?)⦘/;
     const match = rawMsg.match(regex);
 
-    // Snapshot time for THIS assistant message before we advance clock
+    // Ensure clock initialized
     if (!Number.isFinite(window.RagTrackerState._clockMs)) {
         window.RagTrackerState.initClockFromSettingsAndChat();
     }
@@ -1863,9 +1867,9 @@ const tracker_onReplyProcessed = (data) => {
         try {
             const parsedData = JSON.parse(jsonStr);
 
+            // Update global state (ignores AI time/date)
             window.RagTrackerState.updateFromJSON(parsedData);
 
-            // snapshot for this message
             const snapshot = {
                 time: messageTime,
                 location: window.RagTrackerState.location,
@@ -1874,28 +1878,24 @@ const tracker_onReplyProcessed = (data) => {
             };
 
             const mesId = ft_getMesIdFromEventArg(data);
-            if (mesId != null) {
-                window.FuckTrackerSnapshots.byMesId[String(mesId)] = snapshot;
-            } else {
-                window.FuckTrackerSnapshots.pending.push(snapshot);
-            }
+            if (mesId != null) window.FuckTrackerSnapshots.byMesId[String(mesId)] = snapshot;
+            else window.FuckTrackerSnapshots.pending.push(snapshot);
 
-            console.log(`[${MODULE_NAME}] [FUCKTRACKER] State Updated + Snapshot stored`);
+            // Strip JSON from the visible assistant message
+            const stripped = rawMsg.replace(regex, "").trim();
+            acc.set(stripped.length ? stripped : "(AI failed to generate dialogue. Please regenerate.)");
 
-            data.text = rawMsg.replace(regex, "").trim();
-            if (data.text.length === 0) {
-                data.text = "(AI failed to generate dialogue. Please regenerate.)";
-            }
+            console.log(`[${MODULE_NAME}] [FUCKTRACKER] State Updated + Snapshot stored (processed hook)`);
         } catch (e) {
-            console.error(`[${MODULE_NAME}] [FUCKTRACKER] Failed to parse JSON:`, e);
-            console.error(`[${MODULE_NAME}] [FUCKTRACKER] Raw JSON string:`, jsonStr);
-            data.text = rawMsg.replace(regex, "").trim();
+            console.error(`[${MODULE_NAME}] [FUCKTRACKER] Failed to parse JSON (processed hook):`, e);
+            // still strip to avoid leaking JSON
+            acc.set(rawMsg.replace(regex, "").trim());
         }
-    }
 
-    // advance clock per assistant message (as requested)
-    window.RagTrackerState.advanceClock();
-    tracker_updateSettingsDebug();
+        // advance clock per assistant message
+        window.RagTrackerState.advanceClock();
+        tracker_updateSettingsDebug();
+    }
 
     return data;
 };
