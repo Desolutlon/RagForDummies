@@ -386,7 +386,31 @@ function ft_ensureRequiredFields() {
             required: true,
         });
     }
-    function ft_getTextAccessor(obj) {
+
+    if (!hasTopic) {
+        fields.splice(1, 0, {
+            title: "Topic",
+            prompt: "Provide a one- or two-word description of the main activity/event/subject driving the current scene's focus. Be specific and concise.",
+            examples: `["Working Out"]`,
+            locked: true,
+            required: true,
+        });
+    }
+
+    // Ensure required are locked
+    fields = fields.map(f => {
+        if (f?.title === "Location" || f?.title === "Topic") {
+            return { ...f, locked: true, required: true };
+        }
+        return f;
+    });
+
+    extensionSettings.trackerFields = fields;
+}
+
+// --- MOVED HELPERS TO GLOBAL SCOPE (Fixed Syntax Error) ---
+
+function ft_getTextAccessor(obj) {
     // Returns { get():string, set(v:string) } for whatever field ST used
     if (!obj || typeof obj !== 'object') return null;
 
@@ -437,26 +461,8 @@ function ft_setStateValueByTitle(title, value) {
 
     tracker_updateSettingsDebug();
 }
-    if (!hasTopic) {
-        fields.splice(1, 0, {
-            title: "Topic",
-            prompt: "Provide a one- or two-word description of the main activity/event/subject driving the current scene's focus. Be specific and concise.",
-            examples: `["Working Out"]`,
-            locked: true,
-            required: true,
-        });
-    }
 
-    // Ensure required are locked
-    fields = fields.map(f => {
-        if (f?.title === "Location" || f?.title === "Topic") {
-            return { ...f, locked: true, required: true };
-        }
-        return f;
-    });
-
-    extensionSettings.trackerFields = fields;
-}
+// -----------------------------------------------------------
 
 function ft_renderFieldsUI() {
     const container = document.getElementById('ft_fields_container');
@@ -2088,13 +2094,24 @@ function createSettingsUI() {
                                 </div>
 
                                 <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.2); border-radius:6px;">
-                                  <div style="font-weight:700; margin-bottom:6px;">Tracked Fields</div>
+                                  <div style="font-weight:700; margin-bottom:6px;">Tracked Fields (Title / Prompt / Examples / Manual Value)</div>
 
                                   <div id="ft_fields_container"></div>
 
                                   <button id="ft_add_field_btn" class="menu_button" style="margin-top:6px; padding:4px 8px; font-size:0.85em;">
                                     Add new field
                                   </button>
+
+                                  <div style="margin-top:10px; padding:8px; background:rgba(0,0,0,0.25); border-radius:6px;">
+                                    <div style="font-weight:700; margin-bottom:6px;">Manual Time Control</div>
+                                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                      <input id="ft_manual_time" class="text_pole" type="datetime-local" />
+                                      <button id="ft_manual_time_apply" class="menu_button" style="padding:4px 8px; font-size:0.85em;">Set Current Time</button>
+                                      <div style="opacity:0.8; font-family:monospace; font-size:0.85em;">
+                                        <span>Now:</span> <span id="ft_time_preview">Loading...</span>
+                                      </div>
+                                    </div>
+                                  </div>
 
                                   <div style="margin-top:10px; padding:5px; background:rgba(0,0,0,0.25); border-radius:4px; font-family:monospace; font-size:0.8em;">
                                     <strong>Current State:</strong><br>
@@ -2118,52 +2135,34 @@ function createSettingsUI() {
     return html;
 }
 
-// Manual value edits (always allowed)
-document.getElementById('ft_fields_container')?.addEventListener('input', (e) => {
-    const t = e.target;
-    if (!t) return;
+function attachEventListeners() {
+    // Basic settings listeners
+    document.getElementById('ragfordummies_enabled')?.addEventListener('change', (e) => { extensionSettings.enabled = e.target.checked; saveSettings(); });
+    document.getElementById('ragfordummies_tracker_enabled')?.addEventListener('change', (e) => { extensionSettings.trackerEnabled = e.target.checked; saveSettings(); });
+    document.getElementById('ragfordummies_tracker_inline')?.addEventListener('change', (e) => { extensionSettings.trackerInline = e.target.checked; saveSettings(); });
+    document.getElementById('ragfordummies_tracker_context_depth')?.addEventListener('change', (e) => { extensionSettings.trackerContextDepth = parseInt(e.target.value) || 10; saveSettings(); });
 
-    const idx = Number(t.getAttribute('data-idx'));
-    if (!Number.isFinite(idx)) return;
-
-    const fields = extensionSettings.trackerFields;
-    if (!Array.isArray(fields) || !fields[idx]) return;
-
-    // existing title/prompt/examples logic you already have...
-    if (!fields[idx].locked) {
-        if (t.classList.contains('ft-field-title')) fields[idx].title = t.value;
-        if (t.classList.contains('ft-field-prompt')) fields[idx].prompt = t.value;
-        if (t.classList.contains('ft-field-examples')) fields[idx].examples = t.value;
-        saveSettings();
-    }
-
-    // NEW: value edits (allowed even if locked)
-    if (t.classList.contains('ft-field-value')) {
-        const title = fields[idx].title;
-        ft_setStateValueByTitle(title, t.value);
-    }
-
-    // Keep time preview fresh
-    const prev = document.getElementById('ft_time_preview');
-    if (prev) prev.textContent = window.RagTrackerState.time || 'Unknown';
-});
-
-// Manual time set button
-document.getElementById('ft_manual_time_apply')?.addEventListener('click', () => {
-    const inp = document.getElementById('ft_manual_time');
-    if (!inp) return;
-
-    const ms = ft_parseDatetimeLocalToMs(inp.value);
-    if (ms == null) return;
-
-    ft_setClockMs(ms);
-
-    const prev = document.getElementById('ft_time_preview');
-    if (prev) prev.textContent = window.RagTrackerState.time || 'Unknown';
-});
+    document.getElementById('ragfordummies_qdrant_local_url')?.addEventListener('change', (e) => { extensionSettings.qdrantLocalUrl = e.target.value; saveSettings(); });
+    document.getElementById('ragfordummies_kobold_url')?.addEventListener('change', (e) => { extensionSettings.koboldUrl = e.target.value; saveSettings(); });
+    document.getElementById('ragfordummies_ollama_url')?.addEventListener('change', (e) => { extensionSettings.ollamaUrl = e.target.value; saveSettings(); });
+    document.getElementById('ragfordummies_ollama_model')?.addEventListener('change', (e) => { extensionSettings.ollamaModel = e.target.value; saveSettings(); });
+    document.getElementById('ragfordummies_openai_api_key')?.addEventListener('change', (e) => { extensionSettings.openaiApiKey = e.target.value; saveSettings(); });
+    document.getElementById('ragfordummies_openai_model')?.addEventListener('change', (e) => { extensionSettings.openaiModel = e.target.value; saveSettings(); });
+    document.getElementById('ragfordummies_retrieval_count')?.addEventListener('change', (e) => { extensionSettings.retrievalCount = parseInt(e.target.value) || 5; saveSettings(); });
+    document.getElementById('ragfordummies_similarity_threshold')?.addEventListener('change', (e) => { extensionSettings.similarityThreshold = parseFloat(e.target.value) || 0.7; saveSettings(); });
+    document.getElementById('ragfordummies_query_message_count')?.addEventListener('change', (e) => { extensionSettings.queryMessageCount = parseInt(e.target.value) || 3; saveSettings(); });
+    document.getElementById('ragfordummies_max_token_budget')?.addEventListener('change', (e) => { extensionSettings.maxTokenBudget = parseInt(e.target.value) || 1000; saveSettings(); });
+    document.getElementById('ragfordummies_exclude_last_messages')?.addEventListener('change', (e) => { extensionSettings.excludeLastMessages = parseInt(e.target.value) || 2; saveSettings(); });
+    document.getElementById('ragfordummies_auto_index')?.addEventListener('change', (e) => { extensionSettings.autoIndex = e.target.checked; saveSettings(); if(e.target.checked) startPolling(); else if(pollingInterval) clearInterval(pollingInterval); });
+    document.getElementById('ragfordummies_inject_context')?.addEventListener('change', (e) => { extensionSettings.injectContext = e.target.checked; saveSettings(); });
+    document.getElementById('ragfordummies_user_blacklist')?.addEventListener('change', (e) => { extensionSettings.userBlacklist = e.target.value; saveSettings(); });
+    document.getElementById('ragfordummies_injection_position')?.addEventListener('change', (e) => { extensionSettings.injectionPosition = e.target.value; saveSettings(); });
+    document.getElementById('ragfordummies_inject_after_messages')?.addEventListener('change', (e) => { extensionSettings.injectAfterMessages = parseInt(e.target.value) || 3; saveSettings(); });
 
     document.getElementById('ragfordummies_embedding_provider')?.addEventListener('change', function() {
         const provider = this.value;
+        extensionSettings.embeddingProvider = provider;
+        saveSettings();
         document.getElementById('ragfordummies_kobold_settings').style.display = provider === 'kobold' ? '' : 'none';
         document.getElementById('ragfordummies_ollama_settings').style.display = provider === 'ollama' ? '' : 'none';
         document.getElementById('ragfordummies_openai_settings').style.display = provider === 'openai' ? '' : 'none';
@@ -2262,13 +2261,38 @@ document.getElementById('ft_manual_time_apply')?.addEventListener('click', () =>
 
         const fields = extensionSettings.trackerFields;
         if (!Array.isArray(fields) || !fields[idx]) return;
-        if (fields[idx].locked) return;
 
-        if (t.classList.contains('ft-field-title')) fields[idx].title = t.value;
-        if (t.classList.contains('ft-field-prompt')) fields[idx].prompt = t.value;
-        if (t.classList.contains('ft-field-examples')) fields[idx].examples = t.value;
+        // existing title/prompt/examples logic you already have...
+        if (!fields[idx].locked) {
+            if (t.classList.contains('ft-field-title')) fields[idx].title = t.value;
+            if (t.classList.contains('ft-field-prompt')) fields[idx].prompt = t.value;
+            if (t.classList.contains('ft-field-examples')) fields[idx].examples = t.value;
+            saveSettings();
+        }
 
-        saveSettings();
+        // NEW: value edits (allowed even if locked)
+        if (t.classList.contains('ft-field-value')) {
+            const title = fields[idx].title;
+            ft_setStateValueByTitle(title, t.value);
+        }
+
+        // Keep time preview fresh
+        const prev = document.getElementById('ft_time_preview');
+        if (prev) prev.textContent = window.RagTrackerState.time || 'Unknown';
+    });
+
+    // Manual time set button
+    document.getElementById('ft_manual_time_apply')?.addEventListener('click', () => {
+        const inp = document.getElementById('ft_manual_time');
+        if (!inp) return;
+
+        const ms = ft_parseDatetimeLocalToMs(inp.value);
+        if (ms == null) return;
+
+        ft_setClockMs(ms);
+
+        const prev = document.getElementById('ft_time_preview');
+        if (prev) prev.textContent = window.RagTrackerState.time || 'Unknown';
     });
 
     document.getElementById('ft_fields_container')?.addEventListener('click', (e) => {
